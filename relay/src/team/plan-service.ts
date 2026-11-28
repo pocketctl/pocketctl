@@ -1,3 +1,4 @@
+import {requireCodeGrant} from './code-step.js'
 import type pg from 'pg'
 import { requireTeamAccess, teamAccountsEnabled } from './access.js'
 import { boundedText, stableDigest } from './delivery-contract.js'
@@ -90,7 +91,7 @@ export class TeamPlanService {
           WHERE b.team_session_id=s.team_session_id AND b.state='active'
             AND d.collaboration_capabilities @> '["team_collaboration_dispatch_v1","team_collaboration_context_v1","team_task_delivery_v1"]'::jsonb),'[]') AS offer_ids
         FROM collaboration_sessions s JOIN collaboration_session_participants p ON p.team_session_id=s.team_session_id
-        WHERE s.team_id=$1 AND s.state='active' AND p.user_id=$2 AND p.state='active' AND (s.task_id=$3 OR EXISTS(SELECT 1 FROM collaboration_calls c WHERE c.task_id=$3 AND c.team_session_id=s.team_session_id) OR EXISTS(SELECT 1 FROM team_task_template_sources ts WHERE ts.task_id=$3 AND ts.team_session_id=s.team_session_id))
+        WHERE s.team_id=$1 AND s.state='active' AND p.user_id=$2 AND p.state='active' AND (s.task_id=$3 OR EXISTS(SELECT 1 FROM collaboration_calls c WHERE c.task_id=$3 AND c.team_session_id=s.team_session_id) OR EXISTS(SELECT 1 FROM team_task_template_sources ts WHERE ts.task_id=$3 AND ts.team_session_id=s.team_session_id) OR EXISTS(SELECT 1 FROM team_session_assignment_items i JOIN team_session_assignments a USING(assignment_id) WHERE i.task_id=$3 AND a.team_session_id=s.team_session_id))
         ORDER BY s.created_at DESC,s.team_session_id`, [task.team_id, actor, taskId])).rows
         .map(row => ({ ...row, current_context_version: Number(row.current_context_version) }))
       return { ...base, reviewers, offers, sessions: sessions.filter(row => !runtime || row.team_session_id === runtime.team_session_id) }
@@ -118,7 +119,7 @@ export class TeamPlanService {
         return prior.response
       }
       if (!['open', 'in_progress'].includes(currentTask.state)) throw new TeamRepositoryError('invalid_state', 'restore or reopen task before editing plan')
-      const linked = (await client.query('SELECT 1 FROM collaboration_calls WHERE task_id=$1 AND team_session_id=$2 UNION ALL SELECT 1 FROM team_task_template_sources WHERE task_id=$1 AND team_session_id=$2 LIMIT 1', [taskId, input.team_session_id])).rows[0]
+      const linked = (await client.query('SELECT 1 FROM collaboration_calls WHERE task_id=$1 AND team_session_id=$2 UNION ALL SELECT 1 FROM team_task_template_sources WHERE task_id=$1 AND team_session_id=$2 UNION ALL SELECT 1 FROM team_session_assignment_items i JOIN team_session_assignments a USING(assignment_id) WHERE i.task_id=$1 AND a.team_session_id=$2 LIMIT 1', [taskId, input.team_session_id])).rows[0]
       if (session.task_id !== taskId && !linked) throw new TeamRepositoryError('invalid_request', 'session does not belong to this task')
       const head = (await client.query('SELECT revision,state FROM team_task_plan_heads WHERE task_id=$1', [taskId])).rows[0]
       const revision = Number(head?.revision ?? 0)
@@ -137,7 +138,7 @@ export class TeamPlanService {
       const members = (await client.query("SELECT user_id FROM collaboration_team_memberships WHERE team_id=$1 AND user_id=ANY($2::int[]) AND state='active' AND role<>'viewer' ORDER BY user_id FOR SHARE", [task.team_id, reviewers])).rows
       if (members.length !== reviewers.length) throw new TeamRepositoryError('reviewer_required', 'reviewers must be writable members of this Team')
       const offers = [...new Set(input.steps.map(step => step.review_policy.primary_offer_id))].sort()
-      const available = (await client.query(`SELECT o.offer_id FROM team_agent_offers o
+      const available = (await client.query(`SELECT o.offer_id,d.agents,o.provider FROM team_agent_offers o
         JOIN collaboration_session_agent_bindings b ON b.offer_id=o.offer_id AND b.team_session_id=$1 AND b.state='active'
         JOIN collaboration_team_memberships m ON m.team_id=o.team_id AND m.user_id=o.owner_user_id AND m.state='active'
         JOIN users u ON u.id=o.owner_user_id AND u.team_enabled
@@ -146,6 +147,11 @@ export class TeamPlanService {
           AND d.collaboration_capabilities @> '["team_collaboration_dispatch_v1","team_collaboration_context_v1","team_task_delivery_v1"]'::jsonb
         ORDER BY o.offer_id FOR SHARE OF o,b,m,u,d`, [input.team_session_id, task.team_id, offers])).rows
       if (available.length !== offers.length) throw new TeamRepositoryError('agent_unavailable', 'each step needs an active bound Agent with delivery capability')
+      for(const step of input.steps){
+        if(!step.code)continue
+        const target=available.find(o=>o.offer_id===step.review_policy.primary_offer_id)!
+        requireCodeGrant(step.code,target.agents,target.provider,task.team_id,target.offer_id)
+      }
       const steps = order.map(id => input.steps.find(step => step.step_id === id)!)
       const planHash = stableDigest({ team_session_id: input.team_session_id, context_version: input.context_version, context_hash: context?.content_hash ?? null,
         spec_revision: input.spec_revision, steps: steps.map(step => ({ step_id: step.step_id, hash: stepDigest(step) })) })

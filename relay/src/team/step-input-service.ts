@@ -1,3 +1,4 @@
+import {requireCodeGrant} from './code-step.js'
 import type pg from 'pg'
 import { readNativeTaskContext } from './task-context-service.js'
 import { requireTeamAccess } from './access.js'
@@ -63,7 +64,7 @@ export class TeamStepInputService {
       const participant=(await client.query("SELECT 1 FROM collaboration_session_participants WHERE team_session_id=$1 AND user_id=$2 AND state='active' FOR SHARE",[identity.team_session_id,actor])).rows[0]
       const task=(await client.query("SELECT 1 FROM team_tasks WHERE task_id=$1 AND state<>'deleted' FOR SHARE",[identity.task_id])).rows[0]
       if(!team||!member||!session||!participant||!task) throw new TeamRepositoryError('team_not_found','step Call not found')
-      const call=(await client.query(`SELECT c.call_id,a.attempt_id,a.plan_revision,a.step_id,a.frozen_inputs,a.input_hash,cs.spec_revision
+      const call=(await client.query(`SELECT c.call_id,c.code_workspace,d.agents,o.provider,o.offer_id,a.attempt_id,a.plan_revision,a.step_id,a.frozen_inputs,a.input_hash,cs.spec_revision
         FROM collaboration_calls c JOIN team_task_step_attempts a ON a.call_id=c.call_id AND a.task_id=c.task_id
         JOIN team_call_delivery_specs cs ON cs.call_id=c.call_id AND cs.task_id=c.task_id
         JOIN collaboration_session_agent_bindings b ON b.binding_id=c.binding_id AND b.state='active'
@@ -74,6 +75,7 @@ export class TeamStepInputService {
           AND b.revision=c.binding_revision AND o.revision=c.offer_revision
         FOR SHARE OF c,b,o,d NOWAIT`,[callId,actor,daemonId])).rows[0]
       if(!call) throw new TeamRepositoryError('team_not_found','step Call is not authorized for this daemon')
+      if(call.code_workspace)requireCodeGrant(call.code_workspace,call.agents,call.provider,identity.team_id,call.offer_id)
       const frozen=call.frozen_inputs as FrozenPlanInput[]
       requireBoundedStepInputs(frozen)
       if(stableDigest(frozen)!==call.input_hash) throw new TeamRepositoryError('artifact_integrity','step input snapshot hash mismatch')

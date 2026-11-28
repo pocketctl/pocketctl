@@ -46,14 +46,14 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     let attempts = 0
     const wrapper = { connect: async () => {
       const client = await pool.connect(), first = ++attempts === 1
-      return { release: () => client.release(), query: (sql: string) =>
+      return { release: () => client.release(), query: (sql: string, args?:unknown[]) =>
         first && sql.includes('pg_advisory_xact_lock')
           ? client.query("DO $$ BEGIN RAISE EXCEPTION 'bootstrap test conflict' USING ERRCODE='40P01'; END $$")
-          : client.query(sql) }
+          : client.query(sql,args) }
     } }
     await initDB(wrapper as unknown as pg.Pool)
     expect(attempts).toBe(2)
-    expect((await pool.query("SELECT to_regclass('attention_items') name")).rows[0].name).toBe('attention_items')
+    expect((await pool.query("SELECT to_regclass('attention_items') AS name")).rows[0].name).toBe('attention_items')
   })
 
   test.each(['blocked', 'failed', 'uncertain'] as const)('can prepare stop SQL for %s', async state => {

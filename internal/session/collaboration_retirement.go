@@ -61,7 +61,7 @@ func readCollaborationRetirement(path, id string) (*collaborationRetirement, err
 func persistCollaborationRetirement(binding collaborationNativeBinding, workspace string) (*collaborationRetirement, error) {
 	record := &collaborationRetirement{
 		SchemaVersion: 1, NativeSessionID: binding.NativeSessionID, Agent: binding.Agent,
-		BindingID: binding.BindingID, WorkspaceRoot: filepath.Dir(filepath.Dir(filepath.Dir(workspace))), Cwd: workspace,
+		BindingID: attemptKey(binding.BindingID, binding.CodeAttempt), WorkspaceRoot: filepath.Dir(filepath.Dir(filepath.Dir(workspace))), Cwd: workspace,
 	}
 	path, err := collaborationRetirementPath(record.NativeSessionID)
 	if err != nil {

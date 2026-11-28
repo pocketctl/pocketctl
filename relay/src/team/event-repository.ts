@@ -15,14 +15,15 @@ export interface AppendMemberEventInput {
   contextVersion: number
 }
 
-type MemberEventRequest = Omit<AppendMemberEventInput, 'contextVersion'>
+type MemberEventRequest = Omit<AppendMemberEventInput, 'contextVersion'> & {contextVersion?:number}
 
-function memberRequestHash(input: Pick<MemberEventRequest, 'content' | 'targetMode' | 'targetOfferIds' | 'referenceEventId'>): string {
+function memberRequestHash(input: Pick<MemberEventRequest, 'content' | 'targetMode' | 'targetOfferIds' | 'referenceEventId' | 'contextVersion'>): string {
   return createHash('sha256').update(JSON.stringify({
     content: input.content,
     target_mode: input.targetMode,
-    target_offer_ids: input.targetMode === 'offers' ? [...new Set(input.targetOfferIds)].sort() : [],
+    target_offer_ids: input.targetMode === 'offers' || input.targetMode === 'readonly_offer' ? [...new Set(input.targetOfferIds)].sort() : [],
     reference_event_id: input.referenceEventId,
+    ...(input.targetMode === 'readonly_offer' ? {context_version: input.contextVersion} : {}),
   })).digest('hex')
 }
 
@@ -68,6 +69,7 @@ export class TeamEventRepository {
         targetMode: row.target_mode,
         targetOfferIds: row.target_offer_ids,
         referenceEventId: row.reference_event_id,
+        contextVersion: Number(row.context_version),
       }) !== memberRequestHash(input)) throw new Error('event_idempotency_conflict')
       const calls = await client.query<{ call_id: string }>(
         `SELECT call_id FROM collaboration_calls WHERE event_id = $1
@@ -114,19 +116,20 @@ export class TeamEventRepository {
     )
     const callIds: string[] = []
     for (const offerId of input.targetOfferIds) {
-      const frozen=await new TeamAgentConfigService(client as unknown as pg.Pool).freeze(client,input.teamSessionId,offerId,input.authorUserId)
+      const mode = input.targetMode === 'readonly_offer' ? 'discussion' : undefined
+      const frozen = await new TeamAgentConfigService(client as unknown as pg.Pool).freeze(client, input.teamSessionId, offerId, input.authorUserId, mode)
       const callId = `ccl_${randomUUID()}`
       await client.query(
         `INSERT INTO collaboration_calls
           (call_id, team_session_id, event_id, offer_id, binding_id, context_version,
-           context_snapshot_hash, history_through_event_seq,requested_config,config_revision,config_hash)
-         SELECT $1, $2, $3, $4, binding.binding_id, $5, context.content_hash, GREATEST($6::bigint - 1, 0),$7::jsonb,$8,$9
+           context_snapshot_hash, history_through_event_seq,requested_config,config_revision,config_hash,execution_mode)
+         SELECT $1, $2, $3, $4, binding.binding_id, $5, context.content_hash, GREATEST($6::bigint - 1, 0),$7::jsonb,$8,$9,$10
          FROM collaboration_session_agent_bindings
            binding
          LEFT JOIN collaboration_context_versions context
            ON context.team_session_id = binding.team_session_id AND context.version = $5
          WHERE binding.team_session_id = $2 AND binding.offer_id = $4 AND binding.state = 'active'`,
-        [callId, input.teamSessionId, eventId, offerId, input.contextVersion, Number(sequence.rows[0].latest_event_seq),frozen ? JSON.stringify(frozen.requested_config):null,frozen?.config_revision??null,frozen?.config_hash??null],
+        [callId, input.teamSessionId, eventId, offerId, input.contextVersion, Number(sequence.rows[0].latest_event_seq),frozen ? JSON.stringify(frozen.requested_config):null,frozen?.config_revision??null,frozen?.config_hash??null,mode??null],
       )
       callIds.push(callId)
     }

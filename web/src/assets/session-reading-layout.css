@@ -1,0 +1,27 @@
+/* Personal and team timelines use the same available pane width. */
+.session-reading-layout { --session-list-width: 282px; }
+.session-reading-pane { --session-content-gutter: max(20px, calc(50% - 460px)); }
+.session-reading-layout.session-fullscreen > .session-panel { display: none; }
+.session-reading-layout.session-fullscreen > .session-reading-pane {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  width: 100%;
+  height: 100dvh;
+}
+@media (max-width: 1024px) {
+  .session-reading-layout { --session-list-width: 260px; }
+}
+@media (width > 768px) {
+  .session-reading-layout.session-fullscreen > .session-reading-pane {
+    --session-content-gutter: clamp(14px, calc(10% - 64px), 160px);
+    --session-reply-max-width: 100%;
+  }
+}
+@media (max-width: 768px) {
+  .session-reading-pane { --session-content-gutter: 14px; }
+  .session-reading-layout.session-fullscreen > .session-reading-pane {
+    height: var(--visual-viewport-bottom, 100dvh);
+    bottom: auto;
+  }
+}

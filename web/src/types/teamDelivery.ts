@@ -3,6 +3,7 @@ export interface DeliverySpec extends ReviewPolicy { task_id: string; revision: 
 export interface DeliveryArtifact { id: string; name: string; mime_type: string; byte_size: number; sha256: string; required: boolean }
 export interface DeliveryEvidence { check_id: string; result: 'passed'|'failed'|'unverified'; source_kind: 'agent_claim'; artifact_id: string; code_revision: string | null }
 export interface TaskSubmission {
+  trusted_passed_checks?:string[]
   can_revoke_artifacts?: boolean;
   submission_id: string; spec_revision: string | number; version: string | number | null; state: 'preparing'|'published';
   summary: string; delivery_role: 'primary'|'contribution'; submitted_by_user_id: number; source_call_id: string;

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/teamcode"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -118,6 +119,12 @@ func (sm *SessionManager) TeamConfigCapabilities(ctx context.Context, agent stri
 	data, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(data)
 	c.Revision = hex.EncodeToString(sum[:])
+	sm.mu.RLock()
+	policy := sm.cwdPolicy
+	sm.mu.RUnlock()
+	if policy != nil {
+		c.CodeWorkspaces = teamcode.Inventory(ctx, agent, policy.Allows)
+	}
 	return c
 }
 func validateTeamRuntimeConfig(c *protocol.TeamRuntimeConfig, cap *protocol.TeamConfigCapabilities) error {

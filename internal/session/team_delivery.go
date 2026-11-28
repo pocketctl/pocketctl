@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/teamcode"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -191,6 +193,20 @@ func (sm *SessionManager) TeamDeliveryWorkspace(job protocol.TeamDeliveryJob) (s
 	if sm.isRetiredCollaborationSession(job.NativeSessionID, job.Provider, cwd) {
 		return "", ErrCollaborationBinding
 	}
+	if job.Authorization.Delivery.Code != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		var r collaborationNativeRecord
+		if json.Unmarshal(data, &r) != nil || r.Binding.CodeLease != job.Authorization.Delivery.Code.LeaseGeneration {
+			return "", ErrCollaborationBinding
+		}
+		if err := teamcode.CheckPrepared(ctx, cwd, r.Binding.PreparedCodeHead, job.Authorization.Delivery.Code.Kind); err != nil {
+			return "", err
+		}
+		if _, err := teamcode.Resolve(ctx, job.Provider, &job.Authorization, policy.Allows); err != nil {
+			return "", err
+		}
+	}
 	return cwd, nil
 }
 
@@ -209,11 +225,11 @@ func deliveryWorkspaceFromRecord(data []byte, job protocol.TeamDeliveryJob, poli
 	}
 	b := record.Binding
 	if b.NativeSessionID != job.NativeSessionID || b.Agent != job.Provider || b.TeamSessionID != auth.TeamSessionID ||
-		b.BindingID != auth.BindingID || b.BindingRevision != auth.BindingRevision || b.OfferID != auth.OfferID ||
+		b.CodeAttempt != codeAttempt(auth) || b.BindingID != auth.BindingID || b.BindingRevision != auth.BindingRevision || b.OfferID != auth.OfferID ||
 		b.OfferRevision != auth.OfferRevision || b.OwnerUserID != auth.OwnerUserID || b.DaemonID != auth.DaemonID {
 		return "", ErrCollaborationBinding
 	}
-	expected := collaborationWorkspace(policy.Roots()[0], auth.BindingID)
+	expected := collaborationWorkspace(policy.Roots()[0], workspaceKey(auth))
 	canonical, err := filepath.EvalSymlinks(record.Cwd)
 	if err != nil || record.Cwd != expected || canonical != expected || policy.Allows(canonical) != nil {
 		return "", ErrCollaborationBinding

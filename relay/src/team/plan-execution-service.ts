@@ -1,3 +1,4 @@
+import {requireCodeGrant} from './code-step.js'
 import { validateTaskBudget, type TaskBudgetPolicy } from './budget-service.js'
 import { TeamTaskBudgetRepository } from './budget-repository.js'
 import type pg from 'pg'
@@ -174,7 +175,7 @@ export class TeamPlanExecutionService {
         const memberships = (await client.query("SELECT user_id FROM collaboration_team_memberships WHERE team_id=$1 AND user_id=ANY($2::int[]) AND state='active' AND role<>'viewer' FOR SHARE", [identity.team_id, reviewers])).rows
         if (memberships.length !== reviewers.length) throw new TeamRepositoryError('reviewer_required', 'reviewer must be a writable Team member')
         const offers = [...new Set(steps.map(s => s.review_policy.primary_offer_id))].sort()
-        const available = (await client.query(`SELECT o.offer_id FROM team_agent_offers o
+        const available = (await client.query(`SELECT o.offer_id,d.agents,o.provider FROM team_agent_offers o
           JOIN collaboration_session_agent_bindings b ON b.offer_id=o.offer_id AND b.team_session_id=$1 AND b.state='active'
           JOIN collaboration_team_memberships m ON m.team_id=o.team_id AND m.user_id=o.owner_user_id AND m.state='active' AND m.role<>'viewer'
           JOIN users u ON u.id=o.owner_user_id AND u.team_enabled
@@ -183,6 +184,11 @@ export class TeamPlanExecutionService {
             AND d.collaboration_capabilities @> '["team_collaboration_dispatch_v1","team_collaboration_context_v1","team_task_delivery_v1","team_task_steps_v1"]'::jsonb
           ORDER BY o.offer_id FOR SHARE OF o,b,m,u,d`, [plan.team_session_id, identity.team_id, offers])).rows
         if (available.length !== offers.length) throw new TeamRepositoryError('capability_not_supported', 'each selected Agent must support step execution')
+      for(const step of steps){
+        if(!step.code)continue
+        const target=available.find(o=>o.offer_id===step.review_policy.primary_offer_id)!
+        requireCodeGrant(step.code,target.agents,target.provider,identity.team_id,target.offer_id)
+      }
         const used = Number((await client.query('SELECT count(*)::int n FROM team_task_step_attempts WHERE task_id=$1', [taskId])).rows[0].n)
         const limit = Number(runtime?.invocation_limit ?? input.invocation_limit)
         const unstarted = Number((await client.query(`SELECT count(*)::int n FROM team_task_plan_steps s WHERE s.task_id=$1 AND s.plan_revision=$2

@@ -1,5 +1,5 @@
 <template>
-  <div v-if="!cachePrivacyBlocked" class="session-layout" :class="{ 'session-fullscreen': sessionFullscreen }">
+  <div v-if="!cachePrivacyBlocked" class="session-layout session-reading-layout" :class="{ 'session-fullscreen': sessionFullscreen }">
     <ShareLinkDialog v-if="showShareManager" :key="sessionId" :session-id="sessionId" :title="sessionTitle" @close="showShareManager=false" @manage="showShareManager=false;router.push({path:'/settings',query:{section:'shares'}})" />
     <!-- Session List Panel -->
     <div class="session-panel">
@@ -135,7 +135,7 @@
     </div>
 
     <!-- Chat Main Area -->
-    <div class="chat-area">
+    <div class="chat-area session-reading-pane">
       <!-- The session list can arrive after the replay request on a direct URL. -->
       <div
         v-if="hasNoSessions && isLoading"
@@ -860,6 +860,7 @@ import { useSessionRename } from '../composables/useSessionRename'
 import type { CommandItem } from '../composables/useWebSocket'
 import { canControlOpenCodeInteractions, isManagedOpenCodeSession, normalizeSessionAgents, resolveInteractionRequest, sessionAgentSwitchDisabled, shouldShowSessionAgentPicker, upsertInteractionRequest, type SessionAgentOption } from '../types/opencode-interactions'
 import { expandCodexPreset, permissionOptions, permissionTitleKey, type AgentType, type ClaudeMode, type PermissionConfig } from '../types/permission'
+import '../assets/session-reading-layout.css'
 import { useVisualViewport } from '../composables/useVisualViewport'
 import { useResponsiveLayout } from '../composables/useResponsiveLayout'
 import { useSessionHeader } from '../composables/useSessionHeader'
@@ -5614,7 +5615,7 @@ onMounted(() => {
 .session-layout { position: relative; display: flex; flex: 1; width: 100%; min-width: 0; height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
 
 /* Session Panel */
-.session-panel { width: 282px; background: var(--bg-secondary); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
+.session-panel { width: var(--session-list-width, 282px); background: var(--bg-secondary); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; flex-shrink: 0; transition: background var(--transition), border-color var(--transition); }
 .session-panel-header { min-height: 66px; padding: 10px 14px 10px 16px; border-bottom: 1px solid var(--sidebar-border); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .session-panel-heading-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .session-panel-header h3 { min-width: 0; overflow: hidden; color: var(--fg); font-size: 13px; font-weight: 650; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
@@ -5698,7 +5699,7 @@ onMounted(() => {
 .session-list-item .sl-meta .agent-badge { flex-shrink: 0; }
 
 /* Chat Area */
-.chat-area { --composer-float-clearance: 156px; --session-content-gutter: max(20px, calc(50% - 460px)); flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
+.chat-area { --composer-float-clearance: 156px; flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
 
 /* Toolbar: identity is allowed to shrink; actions always retain a stable lane. */
 .chat-toolbar { min-height: 62px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 7px 100px 7px 18px; gap: 16px; background: color-mix(in srgb, var(--topbar-bg) 92%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); transition: background var(--transition), border-color var(--transition); }
@@ -6017,7 +6018,6 @@ onMounted(() => {
 }
 @media (max-width: 1024px) {
   .session-layout { height: calc(100dvh - var(--topbar-h)); }
-  .session-panel { width: 260px; }
 }
 @media (max-width: 1180px) and (min-width: 769px) {
   .session-toolbar-actions > .context-pill,
@@ -6033,7 +6033,7 @@ onMounted(() => {
 }
 @media (max-width: 768px) {
   .session-layout { height: calc(var(--visual-viewport-bottom, 100dvh) - var(--mobile-topbar-h)); }
-  .chat-area { --composer-float-clearance: 112px; --session-content-gutter: 14px; }
+  .chat-area { --composer-float-clearance: 112px; }
   .session-layout > .session-panel,
   .session-layout .chat-toolbar { display: none; }
   .session-fullscreen .chat-toolbar { display: flex; padding-right: 104px; }
@@ -6324,17 +6324,3 @@ onMounted(() => {
 </style>
 
 <style scoped>.scroll-to-bottom.has-unread{width:auto;min-width:90px;border-radius:20px;gap:6px;padding:0 12px;font-size:12px;min-height:40px}</style>
-
-<style>
-.session-layout.session-fullscreen > .chat-area { position: fixed; inset: 0; height: 100dvh; width: 100%; z-index: 70; }
-.session-layout.session-fullscreen > .session-panel { display: none; }
-@media (width > 768px) {
-  .session-layout.session-fullscreen > .chat-area {
-    --session-content-gutter: clamp(14px, calc(10% - 64px), 160px);
-    --session-reply-max-width: 100%;
-  }
-}
-@media (max-width: 768px) {
-  .session-layout.session-fullscreen > .chat-area { height: var(--visual-viewport-bottom, 100dvh); bottom: auto; }
-}
-</style>

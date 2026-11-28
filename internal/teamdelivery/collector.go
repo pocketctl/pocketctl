@@ -4,15 +4,18 @@ package teamdelivery
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/teamcode"
 	"io"
 	"path"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -180,6 +183,41 @@ func Collect(workspace string, job protocol.TeamDeliveryJob) (*Snapshot, error) 
 	final, err := sessiondocument.ReadExplicitArtifact(workspace, manifestPath, MaxManifestBytes)
 	if err != nil || !bytes.Equal(raw, final) {
 		return nil, fmt.Errorf("delivery_manifest_changed")
+	}
+	if a := &job.Authorization; a.Delivery.Code != nil {
+		if len(result.Files) > 14 || result.Files[teamcode.ManifestID] != nil || result.Files[teamcode.BundleID] != nil {
+			return nil, fmt.Errorf("reserve two artifact slots for Git delivery")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		m, b, e := teamcode.Export(ctx, workspace, a)
+		if errors.Is(e, sessiondocument.ErrArtifactTooLarge) {
+			return nil, fmt.Errorf("delivery_artifact_too_large: %w", e)
+		}
+		if e != nil {
+			return nil, fmt.Errorf("delivery_manifest_invalid: %w", e)
+		}
+		if input.CodeRevision != nil && *input.CodeRevision != m.Head {
+			return nil, fmt.Errorf("delivery SHA does not match actual HEAD")
+		}
+		result.Submission.CodeRevision = &m.Head
+		for i := range result.Submission.Evidence {
+			result.Submission.Evidence[i].CodeRevision = &m.Head
+		}
+		manifest, e := json.Marshal(m)
+		if e != nil {
+			return nil, e
+		}
+		for _, file := range []struct {
+			id, name, mime string
+			data           []byte
+		}{{teamcode.ManifestID, "code-manifest.json", "application/json", manifest}, {teamcode.BundleID, "code.bundle", teamcode.BundleMIME, b}} {
+			result.Files[file.id] = file.data
+			result.Submission.Artifacts = append(result.Submission.Artifacts, protocol.TeamDeliveryArtifact{ID: file.id, Name: file.name, MIMEType: file.mime, ByteSize: len(file.data), SHA256: inputDigest(file.data), Required: true})
+		}
+		if e = result.validate(); e != nil {
+			return nil, e
+		}
 	}
 	return result, nil
 }

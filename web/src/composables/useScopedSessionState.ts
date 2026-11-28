@@ -11,7 +11,7 @@ export function sessionScopeKey(scope: SessionScope): string {
 export function scopedSessionStateKey(
   scope: SessionScope,
   sessionId: string,
-  state: 'draft' | 'filters' | 'reading-position' | 'open-session',
+  state: 'draft' | 'recipients' | 'filters' | 'reading-position' | 'open-session',
 ): string {
   return `${sessionScopeKey(scope)}:${sessionId}:${state}`
 }
@@ -23,11 +23,12 @@ export function useScopedSessionDraft(
   scope: Readonly<Ref<SessionScope>>,
   sessionId: Readonly<Ref<string>>,
   owner: Readonly<Ref<string>> = ref(''),
+  field: 'draft' | 'recipients' = 'draft',
 ): { draft: Ref<string>; clearDraft(session?: string): void } {
   const draft = ref('')
   let activeKey = ''
 
-  const key = (id: string) => JSON.stringify([owner.value, scopedSessionStateKey(scope.value, id, 'draft')])
+  const key = (id: string) => JSON.stringify([owner.value, scopedSessionStateKey(scope.value, id, field)])
   watch([scope, sessionId, owner], ([, nextSessionId]) => {
     if (activeKey) {
       if (draft.value) draftStore.set(activeKey, draft.value)

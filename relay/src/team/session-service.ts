@@ -1,3 +1,6 @@
+import {codeGrants,type CodeGrant} from './code-step.js'
+import {TeamGroupAssignments, type TaskDispatch} from './group-assignments.js'
+import {TeamPlanService} from './plan-service.js'
 import { frozenTaskRequirementsText } from './task-requirements-snapshot.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
@@ -7,7 +10,7 @@ import { validateReviewPolicy, validateMutation, positiveRevision, stableDigest,
 import { requireTeamAccess } from './access.js'
 import { candidateForProvider, type DaemonAgentEvidence } from './agent-offers.js'
 import { TeamReadStateService } from './read-state-service.js'
-import { TeamAgentConfigService, bindingConfigView } from './agent-config-service.js'
+import { TeamAgentConfigService, bindingConfigView, readOnlyQuestionsEnabled, supportsReadOnlyQuestion } from './agent-config-service.js'
 import type { TeamRuntimeConfig, SessionAgentConfig } from './types.js'
 import { TeamEventRepository } from './event-repository.js'
 import { TeamRepositoryError } from './repository.js'
@@ -26,11 +29,13 @@ export interface TeamSessionView {
   revision: number
   latest_event_seq: number
   current_context_version: number
+  group_assignments?: boolean
+  group_plans?: boolean
   read_event_seq?: number
   unread_count?: number
   preview?: string | null
   participants: Array<{ id: string; user_id: number; state: string; revision: number }>
-  agent_bindings: Array<{ id: string; offer_id: string; owner_user_id: number; daemon_id: string; provider: TeamProvider; state: string; revision: number; native_session_id: string | null; availability: string; config?: SessionAgentConfig }>
+  agent_bindings: Array<{ id: string; offer_id: string; owner_user_id: number; daemon_id: string; provider: TeamProvider; state: string; revision: number; native_session_id: string | null; availability: string; read_only_question?: boolean; code_workspaces?:CodeGrant[]; config?: SessionAgentConfig }>
   created_at: string
   updated_at: string
 }
@@ -59,7 +64,19 @@ export class TeamSessionService {
     private readonly memoryContextBridge?: TeamMemoryContextBridge,
     private readonly deliveryEnabledForTeam: (teamId: string) => boolean = () => false,
     private readonly externalEnabledForTeam: (teamId: string) => boolean = () => false,
-  ) {}
+    private readonly plansEnabledForTeam: (teamId:string)=>boolean = () => false,
+  ) {
+    this.assignments = new TeamGroupAssignments({
+      transaction: run => this.transaction(run),
+      session: (client,id,actor,lock) => this.sessionFor(client,id,actor,lock),
+      dispatch: (client,input,team) => this.dispatchTask(client,input,team),
+      publish: (session,users,events) => { for(const event of events)this.notifier.event?.(session,users,event) },
+      enqueue: ids => this.notifier.dispatch?.(ids),
+      enabled: this.deliveryEnabledForTeam,
+      plans: new TeamPlanService(pool,{writesEnabledForTeam:plansEnabledForTeam}),
+    })
+  }
+  readonly assignments: TeamGroupAssignments
 
   private async transaction<T>(run: (client: pg.PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect()
@@ -435,8 +452,14 @@ export class TeamSessionService {
         targetMode: input.targetMode,
         targetOfferIds: input.targetOfferIds,
         referenceEventId: input.referenceEventId,
+        contextVersion: input.contextVersion,
       })
       if (prior) return { appended: prior, participantUserIds: [], replayed: true }
+      if (input.targetMode === 'readonly_offer') {
+        if (!readOnlyQuestionsEnabled()) throw new TeamRepositoryError('team_feature_disabled', 'Read-only questions are disabled')
+        if (input.targetOfferIds.length !== 1) throw new TeamRepositoryError('invalid_state', 'Select exactly one Agent for a read-only question')
+        if (input.contextVersion !== Number(session.current_context_version)) throw new TeamRepositoryError('revision_conflict','Group context changed. Review the current version before sending.', Number(session.current_context_version))
+      }
       const bindingRows = await client.query(
         `SELECT binding.offer_id, offer.*, daemon.hostname, daemon.status, daemon.agents,
                 daemon.collaboration_capabilities, team_binding.team_id AS occupied_team_id,
@@ -454,7 +477,7 @@ export class TeamSessionService {
       if (input.targetMode !== 'discussion' && callable.length === 0) throw new TeamRepositoryError('no_callable_agent', 'no callable Agent is available')
       let targets: string[] = []
       if (input.targetMode === 'all') targets = callable.map(row => row.offer_id)
-      if (input.targetMode === 'offers') {
+      if (input.targetMode === 'offers' || input.targetMode === 'readonly_offer') {
         const allowed = new Set(callable.map(row => row.offer_id))
         targets = [...new Set(input.targetOfferIds)]
         if (targets.length === 0 || targets.some(offerId => !allowed.has(offerId))) throw new TeamRepositoryError('agent_unavailable', 'selected Agent is not callable')
@@ -489,6 +512,22 @@ export class TeamSessionService {
     return result.appended
   }
 
+  private async dispatchTask(client:pg.PoolClient,input:TaskDispatch,teamId:string) {
+      if (input.reviewPolicy && (!this.deliveryEnabledForTeam(teamId) || !input.targetOfferIds.includes(input.reviewPolicy.primary_offer_id))) throw new TeamRepositoryError('team_feature_disabled', 'delivery unavailable for Team or primary Agent not among targets')
+      const taskId=`ctk_${randomUUID()}`
+      await client.query(`INSERT INTO team_tasks(task_id,team_id,creator_user_id,title,background) VALUES($1,$2,$3,$4,$5)`,[taskId,teamId,input.actorUserId,input.instruction.split('\n')[0].slice(0,240),input.instruction+'\n\n交付与验收：\n'+input.acceptance])
+      if (input.reviewPolicy) await createInitialTaskSpec(client, taskId, input.actorUserId, input.instruction, input.acceptance, input.reviewPolicy)
+      await client.query(`INSERT INTO team_task_holders(task_id,user_id) VALUES($1,$2)`,[taskId,input.actorUserId])
+      // Internal source events do not consume the direct-message request ID
+      // namespace. The operation receipt is the sole task deduplication key.
+      const message=await this.appendMessage({sessionId:input.sessionId,actorUserId:input.actorUserId,requestId:`task-${randomUUID()}`,content:input.instruction+'\n\n交付与验收：\n'+input.acceptance,targetMode:'offers',targetOfferIds:input.targetOfferIds,referenceEventId:input.referenceEventId??null,contextVersion:input.contextVersion},client)
+      await client.query('UPDATE collaboration_events SET request_id=NULL WHERE event_id=$1',[message.event.id])
+      message.event.request_id=null
+      await client.query('UPDATE collaboration_calls SET task_id=$2 WHERE call_id=ANY($1::text[])',[message.call_ids,taskId])
+      if (input.reviewPolicy) await client.query('INSERT INTO team_call_delivery_specs(call_id,task_id,spec_revision) SELECT unnest($1::text[]),$2,1', [message.call_ids, taskId])
+      return {task_id:taskId,...message}
+  }
+
   async assignTask(input:{sessionId:string;actorUserId:number;requestId:string;instruction:string;acceptance:string;targetOfferIds:string[];contextVersion:number;referenceEventId?:string|null;reviewPolicy?:TaskReviewPolicy}) {
     if (input.reviewPolicy) validateReviewPolicy(input.reviewPolicy)
     if(!input.instruction.trim()||!input.acceptance.trim()||input.instruction.length>32000||input.acceptance.length>16000||input.targetOfferIds.length<1||input.targetOfferIds.length>16)throw new TeamRepositoryError('invalid_state','task instruction, acceptance and targets required')
@@ -500,19 +539,7 @@ export class TeamSessionService {
       const prior=(await client.query(`SELECT request_hash,response FROM collaboration_team_idempotency WHERE user_id=$1 AND operation=$2 AND request_id=$3`,[input.actorUserId,operation,input.requestId])).rows[0]
       if(prior){if(prior.request_hash!==fingerprint)throw new TeamRepositoryError('idempotency_conflict','task request reused with different content');return {...prior.response,replayed:true}}
       if(input.contextVersion!==Number(session.current_context_version))throw new TeamRepositoryError('context_revision_conflict','selected materials changed',Number(session.current_context_version))
-      if (input.reviewPolicy && (!this.deliveryEnabledForTeam(session.team_id) || !input.targetOfferIds.includes(input.reviewPolicy.primary_offer_id))) throw new TeamRepositoryError('team_feature_disabled', 'delivery unavailable for Team or primary Agent not among targets')
-      const taskId=`ctk_${randomUUID()}`
-      await client.query(`INSERT INTO team_tasks(task_id,team_id,creator_user_id,title,background) VALUES($1,$2,$3,$4,$5)`,[taskId,session.team_id,input.actorUserId,input.instruction.split('\n')[0].slice(0,240),input.instruction+'\n\n交付与验收：\n'+input.acceptance])
-      if (input.reviewPolicy) await createInitialTaskSpec(client, taskId, input.actorUserId, input.instruction, input.acceptance, input.reviewPolicy)
-      await client.query(`INSERT INTO team_task_holders(task_id,user_id) VALUES($1,$2)`,[taskId,input.actorUserId])
-      // Internal source events do not consume the direct-message request ID
-      // namespace. The operation receipt is the sole task deduplication key.
-      const message=await this.appendMessage({sessionId:input.sessionId,actorUserId:input.actorUserId,requestId:`task-${randomUUID()}`,content:input.instruction+'\n\n交付与验收：\n'+input.acceptance,targetMode:'offers',targetOfferIds:input.targetOfferIds,referenceEventId:input.referenceEventId??null,contextVersion:input.contextVersion},client)
-      await client.query('UPDATE collaboration_events SET request_id=NULL WHERE event_id=$1',[message.event.id])
-      message.event.request_id=null
-      await client.query('UPDATE collaboration_calls SET task_id=$2 WHERE call_id=ANY($1::text[])',[message.call_ids,taskId])
-      if (input.reviewPolicy) await client.query('INSERT INTO team_call_delivery_specs(call_id,task_id,spec_revision) SELECT unnest($1::text[]),$2,1', [message.call_ids, taskId])
-      const response={task_id:taskId,...message}
+      const response=await this.dispatchTask(client,input,session.team_id)
       await client.query(`INSERT INTO collaboration_team_idempotency(user_id,operation,request_id,request_hash,response) VALUES($1,$2,$3,$4,$5::jsonb)`,[input.actorUserId,operation,input.requestId,fingerprint,JSON.stringify(response)])
       return {...response,replayed:false}
     })
@@ -676,9 +703,13 @@ export class TeamSessionService {
       revision: Number(row.revision),
       latest_event_seq: Number(row.latest_event_seq),
       current_context_version: Number(row.current_context_version),
+      group_assignments: this.deliveryEnabledForTeam(row.team_id),
+      group_plans:this.plansEnabledForTeam(row.team_id),
       participants: participants.rows.map(participant => ({ id: participant.participant_id, user_id: Number(participant.user_id), state: participant.state, revision: Number(participant.revision) })),
       agent_bindings: bindings.rows.map(binding => ({
         config: bindingConfigView(binding),
+        code_workspaces: codeGrants(binding.agents,binding.provider,row.team_id,binding.offer_id),
+        ...(readOnlyQuestionsEnabled() ? {read_only_question: supportsReadOnlyQuestion(binding)} : {}),
         id: binding.binding_id,
         offer_id: binding.offer_id,
         owner_user_id: Number(binding.owner_user_id),

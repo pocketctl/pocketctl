@@ -11,7 +11,7 @@ const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
 const { t } = useLocale()
 const label = computed(() => t(props.modelValue ? 'session.fullscreen_exit' : 'session.fullscreen_enter'))
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && props.modelValue && !props.escapeBlocked && !event.defaultPrevented && !document.querySelector('dialog[open], [role=dialog], .modal-overlay')) {
+  if (event.key === 'Escape' && props.modelValue && !props.escapeBlocked && !event.defaultPrevented && !document.querySelector('dialog[open], [role=dialog], .modal-overlay, .workspace-action-list, .mention-menu[role=listbox]')) {
     emit('update:modelValue', false)
     event.preventDefault()
   }

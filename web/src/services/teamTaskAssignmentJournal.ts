@@ -1,7 +1,7 @@
 import {validTemplateTask,type TemplateTaskOperation} from '../types/teamTemplate'
 import type { ReviewPolicy } from '../types/teamDelivery'
 import type { TeamEvent } from '../types/team'
-export type TaskAssignmentInput={request_id:string;instruction:string;acceptance:string;target_offer_ids:string[];context_version:number;review_policy?:ReviewPolicy}
+export type TaskAssignmentInput={request_id:string;instruction:string;acceptance:string;target_offer_ids:string[];context_version:number;reference_event_id?:string;review_policy?:ReviewPolicy}
 export type TaskAssignment={team:string;session:string;actor:number;input:TaskAssignmentInput}
 export type TaskAssignmentResult={task_id:string;event:TeamEvent;call_ids:string[]}
 export type TaskAssignmentReceipt={operation:'assign_task';request_id:string;team_session_id:string;found:boolean;response:TaskAssignmentResult|null}
@@ -10,12 +10,14 @@ export function validTaskAssignment(value:unknown):value is TaskAssignment {
  const text=(s:unknown,max:number)=>typeof s==='string'&&!!s.trim()&&s.length<=max
  return !!op&&typeof op==='object'&&!('kind' in op)&&text(op.team,256)&&text(op.session,256)&&Number.isSafeInteger(op.actor)&&op.actor>0&&!!i&&text(i.request_id,128)
   &&text(i.instruction,32000)&&text(i.acceptance,16000)&&Number.isSafeInteger(i.context_version)&&i.context_version>=0
+  &&(i.reference_event_id===undefined||text(i.reference_event_id,256))
   &&Array.isArray(i.target_offer_ids)&&i.target_offer_ids.length>0&&i.target_offer_ids.length<=16&&i.target_offer_ids.every(id=>text(id,128))&&new Set(i.target_offer_ids).size===i.target_offer_ids.length
   &&(p===undefined||!!p&&Number.isSafeInteger(p.reviewer_user_id)&&p.reviewer_user_id>0&&i.target_offer_ids.includes(p.primary_offer_id)&&Array.isArray(p.required_checks)&&p.required_checks.length<=32&&p.required_checks.every(c=>text(c,120))&&new Set(p.required_checks).size===p.required_checks.length)
 }
 export function matchingTaskAssignment(op:TaskAssignment,result:TaskAssignmentResult):boolean {
  const e=result?.event,i=op.input,ids=i.target_offer_ids
  return typeof result?.task_id==='string'&&!!result.task_id&&!!e&&typeof e.id==='string'&&!!e.id&&e.team_session_id===op.session&&e.author_user_id===op.actor
+  &&(e.reference?.event_id??undefined)===i.reference_event_id
   &&e.content===i.instruction+'\n\n交付与验收：\n'+i.acceptance&&e.context_version===i.context_version&&Array.isArray(e.target_offer_ids)&&e.target_offer_ids.length===ids.length&&new Set(e.target_offer_ids).size===ids.length&&e.target_offer_ids.every(id=>ids.includes(id))
   &&Array.isArray(result.call_ids)&&result.call_ids.length===ids.length&&new Set(result.call_ids).size===ids.length&&result.call_ids.every(id=>typeof id==='string'&&!!id)
 }

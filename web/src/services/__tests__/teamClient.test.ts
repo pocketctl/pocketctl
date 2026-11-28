@@ -151,6 +151,11 @@ describe('teamClient', () => {
     expect(requests[0].url).toContain('daemon_id=daemon+1&provider=codex')
     expect(requests[1].body).toMatchObject({ title: 'Review', offer_ids: ['offer-1'] })
     expect(requests[2].body).toMatchObject({ content: 'hello', target_mode: 'offers', target_offer_ids: ['offer-1'], reference_event_id: 'e0' })
+    expect(requests[2].body).not.toHaveProperty('context_version')
+    await appendTeamMessage('css_1', {requestID:'saved-question',content:'Review this',targetMode:'readonly_offer',
+      targetOfferIDs:['offer-1'],referenceEventID:'e0',contextVersion:0})
+    expect(requests[3].body).toEqual({request_id:'saved-question',content:'Review this',target_mode:'readonly_offer',
+      target_offer_ids:['offer-1'],reference_event_id:'e0',context_version:0})
   })
 
   test('uses revision-checked run controls and supplement requests', async () => {

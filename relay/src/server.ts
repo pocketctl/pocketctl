@@ -1091,7 +1091,7 @@ async function main() {
     event: () => {}, // Shared delivery comes from the transactional Team journal.
     revoked: (sessionId, userId) => router.revokeTeamSubscription(sessionId, userId),
     dispatch: callIds => teamDispatchService?.enqueue(callIds),
-  }, teamMemorySources, teamMemoryContextBridge, teamId => teamDeliveryEnabled(teamConfig, teamId), teamId => teamExternalExecutorEnabled(teamConfig, teamId))
+  }, teamMemorySources, teamMemoryContextBridge, teamId => teamDeliveryEnabled(teamConfig, teamId), teamId => teamExternalExecutorEnabled(teamConfig, teamId), teamId => teamPlanDraftEnabled(teamConfig,teamId))
   const teamRunService = new TeamRunService(pool, {
     event: () => {}, // Shared delivery comes from the transactional Team journal.
   }, teamId => teamExternalExecutorEnabled(teamConfig, teamId))

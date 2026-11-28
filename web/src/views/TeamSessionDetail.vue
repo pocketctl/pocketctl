@@ -1,11 +1,11 @@
 <template>
-  <div class="team-session-layout" data-testid="team-session-detail">
+  <div class="team-session-layout session-reading-layout" :class="{ 'session-fullscreen': sessionFullscreen }" data-testid="team-session-detail">
     <aside class="session-panel">
       <TeamSessionBrowser v-if="browseScope.type === 'team'" ref="teamBrowser" :key="browseScope.teamId" :team-id="browseScope.teamId" :current-session-id="sessionID" :current-team-id="teamID" @update:scope="changeScope" @filtered="outsideBrowse = $event" @updated="applyBrowserUpdate" />
       <PersonalSessionBrowser v-else @update:scope="changeScope" />
     </aside>
 
-    <main class="conversation">
+    <main class="conversation session-reading-pane">
       <div v-if="browseScope.type === 'personal' || outsideBrowse" class="session-filter-notice" role="status"><span> {{ t('workspace.outside_filter_hint') }} </span><button @click="revealCurrent"> {{ t('workspace.reveal_in_list') }} </button></div>
       <header class="conversation-header">
         <RouterLink class="mobile-back" :aria-label="t('workspace.return_session_list')" :to="listLink">‹</RouterLink>
@@ -13,6 +13,7 @@
         <div class="header-actions">
           <span v-if="session" :class="['session-state', session.state]">{{ stateLabel(session.state) }}</span>
           <div class="session-id-box"><span>{{ sessionID.slice(0,8) }}</span><button type="button" :aria-label="t('session.actions.copy_id')" @click="copySessionID"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>
+          <SessionFullscreenToggle v-model="sessionFullscreen" :escape-blocked="moreOpen" />
           <div ref="moreRoot" class="session-more" @keydown.esc.stop="moreOpen = false"><button :aria-label="t('workspace.more_session_actions')" :aria-expanded="moreOpen" @click="moreOpen = !moreOpen">···</button><div v-if="moreOpen" class="session-more-menu"><button v-if="isCreator && session" @click="togglePaused(); moreOpen = false">{{ session.state === 'paused' ? t('workspace.resume') : t('workspace.pause') }}</button><button @click="copySessionID(); moreOpen = false"> {{ t('session.actions.copy_id') }} </button></div></div>
         </div>
       </header>
@@ -48,13 +49,18 @@
           </div>
           <TeamSessionDeliveryCard v-for="card in deliveriesByEvent.get(event.id) || []" :key="card.task_id" :item="card" :cached="deliveryCards.cached.value" :reviewer="deliveryReviewer(card.reviewer_user_id)" @open="deliveryTaskID=$event" />
           <small v-if="event.author_user_id===currentUserID && event.kind==='member_message'">已发送</small>
-          <div class="event-actions"><span v-if="event.target_mode">{{ targetLabel(event) }}</span><button v-if="event.context_version" class="context-receipt" @click="openContextVersion(event.context_version)">Context v{{ event.context_version }}</button><button type="button" @click="referenceEvent = event"> {{ t('workspace.references') }} </button></div>
+          <div class="event-actions">
+            <span v-if="event.target_mode">{{ targetLabel(event) }}</span>
+            <button v-if="event.context_version" class="context-receipt" @click="openContextVersion(event.context_version)">Context v{{ event.context_version }}</button>
+            <button v-if="session?.group_assignments && event.kind==='agent_message'" class="post-assignment" @click="groupSource=event">方案与分工</button>
+            <button type="button" :aria-label="t('workspace.message_actions')" @click="messageActions=event">···</button>
+          </div>
           </div>
         </article>
         <p v-if="deliveryCards.error.value" role="status">{{ deliveryCards.error.value }}</p>
         <TeamSessionDeliveryCard v-for="card in unanchoredDeliveries" :key="card.task_id" :item="card" :cached="deliveryCards.cached.value" :reviewer="deliveryReviewer(card.reviewer_user_id)" @open="deliveryTaskID=$event" />
         <button v-if="deliveryCards.more.value" class="btn" :disabled="deliveryCards.loading.value" @click="deliveryCards.loadMore()">更多任务交付</button>
-        <article v-for="pending in pendingMessages" :key="pending.request_id" class="event member_message own-message"><div class="event-body"><strong>我</strong><MessageUser :content="pending.content" /><small role="status">{{ ({queued:'待发送',sending:'发送中',failed:'发送失败',unknown:'结果未知'})[pending.state] }}</small><button v-if="pending.state==='failed'" type="button" @click="retryMessage(pending.request_id)">重试</button><button v-if="pending.state==='unknown'" type="button" @click="reconcileMessage(pending.request_id)">核对结果</button></div></article>
+        <article v-for="pending in pendingMessages" :key="pending.request_id" class="event member_message own-message"><div class="event-body"><strong>我</strong><MessageUser :content="pending.content" /><small role="status">{{ ({queued:'待发送',sending:'发送中',failed:'发送失败',unknown:'结果未知'})[pending.state] }}</small><button v-if="pending.state==='failed'" type="button" @click="retryMessage(pending.request_id)">重试</button><button v-if="pending.state==='failed' && pending.target_mode==='readonly_offer'" type="button" @click="cancelFailedQuestion(pending.request_id)">{{ t('workspace.cancel_pending_question') }}</button><button v-if="pending.state==='unknown'" type="button" @click="reconcileMessage(pending.request_id)">核对结果</button></div></article>
         <TeamPrivateApprovalCard v-for="item in interactions.items.value" :key="item.item_id" :item="item" :connected="interactions.connected.value" :busy="interactions.busy.value===item.item_id" @act="interactions.act(item,$event)" />
         <p v-if="interactions.error.value" role="alert">{{ interactions.error.value }}</p>
       </section>
@@ -65,19 +71,28 @@
         <div class="textarea-resize-handle" role="separator" :aria-label="t('workspace.resize_composer')" aria-orientation="horizontal" @pointerdown="beginResize"></div>
         <div v-if="referenceEvent" class="reply-preview"><span>{{ authorLabel(referenceEvent) }} · {{ referenceEvent.content.slice(0,160) }}</span><button type="button" @click="referenceEvent = null">×</button></div>
         <div class="composer-row">
-          <textarea v-model="draft" :style="{height:textareaHeight + 'px'}" :disabled="!!readOnlyReason" rows="1" :placeholder="readOnlyReason || t('workspace.team_composer_placeholder')" data-testid="team-session-composer" @keydown.enter.exact.prevent="send" />
+          <TeamAgentTargetPicker v-model="target" v-model:text="draft" :height="textareaHeight" :disabled="!!readOnlyReason || sending" :placeholder="readOnlyReason || t('workspace.team_composer_placeholder')"
+            :bindings="session?.agent_bindings ?? []" :members="members" :participant-ids="session?.participants.filter(p=>p.state==='active').map(p=>p.user_id) ?? []" @send="send" />
         </div>
-        <div class="composer-controls"><TeamAgentTargetPicker v-model="target" :bindings="session?.agent_bindings ?? []" :members="members" /><button type="button" class="composer-tool" :disabled="!!readOnlyReason||!session?.agent_bindings.some(b=>b.availability==='online')" @click="assignTaskOpen=true">分派任务</button><span class="composer-context">Context v{{ session?.current_context_version || 0 }}</span><button class="materials-button" @click="historyContext = null; showContext = true; showParticipants = false; showRun = false"> {{ t('workspace.materials') }} </button>
+        <div class="composer-controls"><button type="button" class="composer-tool" :disabled="!!readOnlyReason||!session?.agent_bindings.some(b=>b.availability==='online')" @click="openTaskDraft()">分派任务</button><span class="composer-context">Context v{{ session?.current_context_version || 0 }}</span><button class="materials-button" @click="historyContext = null; showContext = true; showParticipants = false; showRun = false"> {{ t('workspace.materials') }} </button>
           <button type="button" class="send-button" :disabled="!canSend || !draft.trim() || !!targetUnavailableReason" data-testid="team-session-send" @click="send">{{ sending ? '…' : '↑' }}</button>
         </div>
         </div>
-        <p v-if="readOnlyReason" class="composer-status">{{ readOnlyReason }}</p>
-        <p v-else-if="targetUnavailableReason" class="composer-status">{{ targetUnavailableReason }}</p>
+        <p v-if="readOnlyReason" role="status" class="composer-status composer-problem">{{ readOnlyReason }}</p>
+        <p v-else-if="targetUnavailableReason" role="status" class="composer-status composer-problem">{{ targetUnavailableReason }}</p>
         <p v-else class="composer-status">{{ target.mode === 'discussion' ? t('workspace.discussion_only_hint') : t('workspace.agent_context_hint') }}</p>
       </footer>
     </main>
 
-    <TeamTaskAssignPanel v-if="assignTaskOpen&&session" :session="session" :members="members" :current-user-id="currentUserID" @close="assignTaskOpen=false" @sent="sentTask" @assigned="assignedDelivery" />
+    <TeamOverlay v-if="messageActions" actions :title="t('workspace.message_actions')" @close="messageActions=null">
+      <div class="post-options">
+        <button v-if="session?.group_assignments && messageActions.kind==='member_message'" @click="groupSource=messageActions;messageActions=null">方案与分工</button>
+        <button v-if="messageActions.kind==='agent_message' && !readOnlyReason" @click="openTaskDraft(messageActions);messageActions=null">{{ t('workspace.draft_task') }}</button>
+        <button @click="referenceEvent=messageActions;messageActions=null">{{ t('workspace.references') }}</button>
+      </div>
+    </TeamOverlay>
+    <TeamGroupAssignment v-if="session && groupSource" :key="groupSource.id" :source="groupSource" :session="session" :members="members" :events="events" :actor="currentUserID" :can-edit="!readOnlyReason" @close="groupSource=null" @task="groupSource=null;deliveryTaskID=$event"/>
+    <TeamTaskAssignPanel v-if="assignTaskOpen&&session" :session="session" :members="members" :current-user-id="currentUserID" :source="taskSource" @close="assignTaskOpen=false;taskSource=null" @sent="sentTask" @assigned="assignedDelivery" />
     <TeamOverlay v-if="deliveryTaskID" title="交付与验收" @close="deliveryTaskID=''">
       <TeamTaskDeliveryPanel :key="deliveryTaskID" :task-id="deliveryTaskID" :current-user-id="currentUserID" :members="members" @changed="deliveryCards.refresh()" />
     </TeamOverlay>
@@ -118,6 +133,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import MessageAgent from '../components/messages/MessageAgent.vue'
 import MessageUser from '../components/messages/MessageUser.vue'
+import '../assets/session-reading-layout.css'
+import { useVisualViewport } from '../composables/useVisualViewport'
+import SessionFullscreenToggle from '../components/session/SessionFullscreenToggle.vue'
 import TeamSessionBrowser from '../components/session/TeamSessionBrowser.vue'
 import PersonalSessionBrowser from '../components/session/PersonalSessionBrowser.vue'
 import { teamSystemEventText } from '../utils/teamEventPresentation'
@@ -125,6 +143,7 @@ import TeamSessionDeliveryCard from '../components/team/TeamSessionDeliveryCard.
 import TeamTaskDeliveryPanel from '../components/team/TeamTaskDeliveryPanel.vue'
 import { useSessionDeliveries } from '../composables/useSessionDeliveries'
 import type { SessionDeliveryCard } from '../types/teamDelivery'
+import TeamGroupAssignment from '../components/team/TeamGroupAssignment.vue'
 import TeamOverlay from '../components/team/TeamOverlay.vue'
 import TeamAgentTargetPicker, { type TeamAgentTargetValue } from '../components/team/TeamAgentTargetPicker.vue'
 import TeamContextPanel from '../components/team/TeamContextPanel.vue'
@@ -132,12 +151,15 @@ import TeamSessionParticipants from '../components/team/TeamSessionParticipants.
 import TeamRunPanel from '../components/team/TeamRunPanel.vue'
 import { useTeamAccess } from '../composables/useTeamAccess'
 import { useAuth } from '../composables/useAuth'
-import { getScopedReadingPosition, setScopedReadingPosition, type SessionScope } from '../composables/useScopedSessionState'
+import { getRelayOrigin } from '../composables/useEnv'
+import { useScopedSessionDraft, getScopedReadingPosition, setScopedReadingPosition, type SessionScope } from '../composables/useScopedSessionState'
 import { useTeamSession } from '../composables/useTeamSession'
 import { getTeamContext, listTeamAgentOffers, listTeamMembers, listTeams, updateTeamSession } from '../services/teamClient'
 import { isTeamProvider } from '../types/team'
 import type { TeamSession, TeamContextSnapshot, TeamCallSummary, TeamAgentOffer, TeamEvent, TeamMember, TeamProvider, TeamSummary } from '../types/team'
 
+useVisualViewport()
+const sessionFullscreen = ref(false)
 const route = useRoute(), { user } = useAuth(), teamAccess=useTeamAccess()
 const teamID = computed(() => String(route.params.teamId ?? '')), sessionID = computed(() => String(route.params.id ?? ''))
 const scope = computed<SessionScope>(() => ({ type: 'team', teamId: teamID.value }))
@@ -145,12 +167,19 @@ const browseScope = ref<SessionScope>({type:'team',teamId:teamID.value})
 const moreRoot=ref<HTMLElement|null>(null)
 function closeMore(event:MouseEvent){if(!moreRoot.value?.contains(event.target as Node))moreOpen.value=false}
 const assignTaskOpen=ref(false)
+const messageActions=ref<TeamEvent|null>(null)
+const groupSource=ref<TeamEvent|null>(null)
+const taskSource=ref<TeamEvent|null>(null)
+function openTaskDraft(event?:TeamEvent) {
+  taskSource.value=event ?? null
+  assignTaskOpen.value=true
+}
 const outsideBrowse = ref(false), moreOpen = ref(false), showTask = ref(false)
 const teamBrowser = ref<InstanceType<typeof TeamSessionBrowser>|null>(null)
 function revealCurrent(){browseScope.value={type:'team',teamId:teamID.value};outsideBrowse.value=false;void nextTick(()=>teamBrowser.value?.revealCurrent())}
 async function copySessionID(){try{await navigator.clipboard.writeText(sessionID.value)}catch{error.value=t('workspace.copy_failed')}}
 const {
-  pendingMessages,retryMessage,reconcileMessage,markRead,
+  pendingMessages,cancelFailedQuestion,retryMessage,reconcileMessage,markRead,
   session, events, calls, context, runContext, latestRun, task, draft, loading, sending, runBusy, error, runError,
   autorunEnabled, readOnlyReason, canSend, sendMessage, createRun, controlRun, supplementRunInput,
   suggestRunPause, withdrawAgent,
@@ -188,11 +217,18 @@ let composerObserver:ResizeObserver|null=null,resizeCleanup:(()=>void)|null=null
 function beginResize(event:PointerEvent){event.preventDefault();resizeCleanup?.();const start=event.clientY,height=textareaHeight.value;const move=(next:PointerEvent)=>{textareaHeight.value=Math.max(64,Math.min(400,height+start-next.clientY))};const finish=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',finish);resizeCleanup=null};resizeCleanup=finish;window.addEventListener('pointermove',move);window.addEventListener('pointerup',finish,{once:true})}
 onMounted(()=>{if(typeof ResizeObserver!=='undefined'&&composerElement.value){composerObserver=new ResizeObserver(()=>{composerHeight.value=composerElement.value?.offsetHeight??190});composerObserver.observe(composerElement.value)}})
 onBeforeUnmount(()=>{composerObserver?.disconnect();resizeCleanup?.()})
-const target = ref<TeamAgentTargetValue>({ mode: 'discussion', offerIDs: [] }), messagesElement = ref<HTMLElement | null>(null)
+const recipientScope = computed(()=>JSON.stringify([getRelayOrigin(),user.value?.id ?? null,teamID.value,sessionID.value]))
+const {draft:recipientDraft}=useScopedSessionDraft(scope,sessionID,recipientScope,'recipients')
+const target = computed<TeamAgentTargetValue>({
+  get:()=>recipientDraft.value ? JSON.parse(recipientDraft.value) : {mode:'discussion',offerIDs:[]},
+  set:value=>{recipientDraft.value=value.mode==='discussion'?'':JSON.stringify(value)},
+})
+const messagesElement = ref<HTMLElement | null>(null)
 const targetUnavailableReason = computed(() => {
   if (target.value.mode === 'discussion') return ''
   const callable = session.value?.agent_bindings.filter(binding => binding.state === 'active' && binding.availability === 'online') ?? []
   if (!callable.length) return t('workspace.no_callable_agents')
+  if (target.value.mode === 'readonly_offer' && !callable.some(b => b.offer_id === target.value.offerIDs[0] && b.read_only_question)) return t('workspace.readonly_unavailable')
   if (target.value.mode === 'offers' && (!target.value.offerIDs.length || target.value.offerIDs.some(id => !callable.some(binding => binding.offer_id === id)))) return t('workspace.choose_callable_agent')
   return ''
 })
@@ -252,6 +288,7 @@ function referenceLabel(id: string): string {
 }
 function agentProvider(offerID: string | null): string { return offers.value.find(offer => offer.id === offerID)?.provider ?? 'agent' }
 function targetLabel(event: TeamEvent): string {
+  if (event.target_mode === 'readonly_offer') return t('workspace.readonly_question')
   if (event.target_mode === 'discussion') return t('workspace.discussion_only_short')
   if (event.target_mode === 'all') return t('workspace.send_all_agents')
   return t('workspace.target_agents_count', {count:event.target_offer_ids.length})
@@ -274,8 +311,9 @@ async function togglePaused(): Promise<void> {
   catch (failure) { error.value = failure instanceof Error ? failure.message : t('workspace.state_update_failed') }
 }
 async function send(): Promise<void> {
+  if (targetUnavailableReason.value) return
   const sent = await sendMessage({ targetMode: target.value.mode, targetOfferIDs: target.value.offerIDs, referenceEventID: referenceEvent.value?.id ?? null })
-  if (sent) { referenceEvent.value = null; await nextTick(); scrollToBottom() }
+  if (sent) { target.value = {mode:"discussion",offerIDs:[]}; referenceEvent.value = null; await nextTick(); scrollToBottom() }
 }
 function scrollToEvent(eventID: string): void {
   const source = events.value.find(event => event.id === eventID)
@@ -285,7 +323,67 @@ function scrollToEvent(eventID: string): void {
   document.getElementById(`team-event-${target}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }
 function scrollToBottom(): void { const element = messagesElement.value; if (element) element.scrollTop = element.scrollHeight }
 const atBottom=ref(true),newMessageCount=ref(0)
-function saveReadingPosition():void{const element=messagesElement.value;if(element){setScopedReadingPosition(scope.value,sessionID.value,element.scrollTop);atBottom.value=element.scrollHeight-element.scrollTop-element.clientHeight<40;if(atBottom.value){newMessageCount.value=0;void markRead().catch(()=>{})}}}
+type ReadingAnchor = { row: Element; offset: number }
+let readingAnchor: ReadingAnchor | undefined
+let streamWidth = 0
+let streamObserver: ResizeObserver | undefined
+
+function visibleAnchor(stream: HTMLElement): ReadingAnchor | undefined {
+  const rows = stream.children
+  const top = stream.getBoundingClientRect().top
+  // The direct children are in visual order, including pending messages and delivery cards.
+  let first = 0, end = rows.length
+  while (first < end) {
+    const middle = Math.floor((first + end) / 2)
+    if (rows[middle].getBoundingClientRect().bottom <= top) first = middle + 1
+    else end = middle
+  }
+  const row = rows[first]
+  return row && { row, offset: row.getBoundingClientRect().top - top }
+}
+
+function alignReadingPosition(stream: HTMLElement) {
+  if (atBottom.value) scrollToBottom()
+  else if (readingAnchor?.row.parentElement === stream) {
+    const rect = readingAnchor.row.getBoundingClientRect()
+    const offset = Math.max(readingAnchor.offset, Math.min(0, 24 - rect.height))
+    stream.scrollTop += rect.top - stream.getBoundingClientRect().top - offset
+    readingAnchor = visibleAnchor(stream)
+  }
+  streamWidth = stream.clientWidth
+}
+
+function saveReadingPosition() {
+  const stream = messagesElement.value
+  if (!stream || (streamObserver && streamWidth !== stream.clientWidth)) return
+  setScopedReadingPosition(scope.value, sessionID.value, stream.scrollTop)
+  atBottom.value = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 40
+  readingAnchor = atBottom.value ? undefined : visibleAnchor(stream)
+  if (atBottom.value) {
+    newMessageCount.value = 0
+    void markRead().catch(() => {})
+  }
+}
+
+watch(sessionFullscreen, async () => {
+  const stream = messagesElement.value
+  if (!stream) return
+  const room = sessionID.value
+  readingAnchor = atBottom.value ? undefined : visibleAnchor(stream)
+  await nextTick()
+  if (room === sessionID.value && stream === messagesElement.value) alignReadingPosition(stream)
+})
+
+onMounted(() => {
+  const stream = messagesElement.value
+  if (!stream || typeof ResizeObserver === 'undefined') return
+  streamWidth = stream.clientWidth
+  streamObserver = new ResizeObserver(() => {
+    if (streamWidth !== stream.clientWidth) alignReadingPosition(stream)
+  })
+  streamObserver.observe(stream)
+})
+onBeforeUnmount(() => streamObserver?.disconnect())
 watch(()=>displayEvents.value.length,async(next,previous)=>{if(loading.value)return;if(atBottom.value){await nextTick();scrollToBottom();void markRead().catch(()=>{})}else newMessageCount.value+=Math.max(0,next-previous)})
 function restoreReadingPosition(): void {
   if (restoredSessionID === sessionID.value || !messagesElement.value || loading.value) return
@@ -294,7 +392,7 @@ function restoreReadingPosition(): void {
   nextTick(() => { if (messagesElement.value) messagesElement.value.scrollTop = position ?? messagesElement.value.scrollHeight })
 }
 watch([teamID, daemonID, provider], () => { void loadList() })
-watch(sessionID, () => { historyGeneration++;newMessageCount.value=0;atBottom.value=true;assignTaskOpen.value=false; historyContext.value=null; restoredSessionID = ''; referenceEvent.value = null; browseScope.value={type:'team',teamId:teamID.value} })
+watch([teamID, sessionID], () => { sessionFullscreen.value=false; readingAnchor=undefined; groupSource.value=null;messageActions.value=null;historyGeneration++;newMessageCount.value=0;atBottom.value=true;assignTaskOpen.value=false; taskSource.value=null; historyContext.value=null; restoredSessionID = ''; referenceEvent.value = null; browseScope.value={type:'team',teamId:teamID.value} })
 watch([loading, () => events.value.length], restoreReadingPosition)
 onMounted(() => {
   daemonID.value = typeof route.query.daemon === 'string' ? route.query.daemon : ''
@@ -311,8 +409,8 @@ onBeforeUnmount(()=>{document.removeEventListener('click',closeMore);historyGene
 .call-status.failed { color: var(--error); }
 .call-status a { color: var(--accent); }
 
-.team-session-layout { height: 100dvh; min-height: 0; display: flex; position: relative; color: var(--fg); background: var(--bg); overflow: hidden; }.session-panel { width: 282px; flex: 0 0 282px; display: flex; flex-direction: column; border-right: 1px solid var(--sidebar-border, var(--border)); background: var(--surface); }.session-panel-header { min-height: 66px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px 10px 16px; border-bottom: 1px solid var(--border); box-sizing: border-box; }.session-panel-header > div { min-width: 0; display: grid; gap: 4px; }.session-panel-header strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; }.session-panel-header small { color: var(--fg-tertiary); font-size: 9px; }.session-panel-header a { color: var(--accent); font-size: 20px; text-decoration: none; }.filters { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 5px 9px 8px; }.filters select { min-width: 0; padding: 7px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-secondary); background: var(--bg); font-size: 9px; }.session-list { min-height: 0; flex: 1; overflow-y: auto; padding: 4px 8px 14px; }.session-list a { min-height: 54px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border-radius: 8px; color: inherit; text-decoration: none; }.session-list a:hover,.session-list a.active { background: var(--surface-hover); }.session-list a.active { box-shadow: inset 2px 0 var(--accent); }.session-list a > div { min-width: 0; display: grid; gap: 4px; }.session-list strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.session-list small { color: var(--fg-tertiary); font-size: 9px; }.state-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--fg-tertiary); }.state-dot.active { background: var(--success); }.state-dot.paused { background: var(--warning); }.conversation { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; position: relative; }.conversation-header { min-height: 62px; display: flex; align-items: center; gap: 12px; padding: 0 18px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 92%, transparent); box-sizing: border-box; }.title-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }.title-copy span { color: var(--fg-tertiary); font-size: 9px; }.title-copy strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }.header-actions { display: flex; align-items: center; gap: 6px; }.header-actions button,.session-state { padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-secondary); background: transparent; font-size: 9px; }.header-actions button { cursor: pointer; }.header-actions button.active { color: var(--accent); background: var(--accent-muted); }.session-state.active { color: var(--success); }.session-state.paused { color: var(--warning); }.mobile-back { display: none; color: var(--fg); font-size: 25px; text-decoration: none; }.return-notice,.error-banner { padding: 7px 16px; border-bottom: 1px solid var(--border); color: var(--fg-secondary); background: var(--surface); font-size: 10px; }.error-banner { color: var(--error); }.messages { min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; padding: 24px clamp(18px, 5vw, 72px) 190px; scrollbar-gutter: stable; }.event { display: flex; flex-direction: column; gap: 6px; }.event-meta { display: flex; justify-content: space-between; color: var(--fg-tertiary); font: 9px var(--font-mono); }.reference { text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; align-self: flex-start; padding: 3px 7px; border: 0; border-radius: 6px; color: var(--accent); background: var(--accent-muted); font-size: 9px; cursor: pointer; }.event-actions { min-height: 18px; display: flex; justify-content: flex-end; gap: 9px; color: var(--fg-tertiary); font-size: 9px; opacity: .72; }.event-actions button { border: 0; color: var(--fg-tertiary); background: none; font-size: 9px; cursor: pointer; }.event-actions button:hover { color: var(--accent); }.system-event { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }.system-event strong { color: var(--fg-secondary); font-size: 10px; }.system-event span { white-space: pre-wrap; color: var(--fg-tertiary); font-size: 10px; line-height: 1.6; }.empty { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--fg-tertiary); font-size: 11px; text-align: center; }.empty strong { color: var(--fg-secondary); font-size: 14px; }.composer-shell { position: absolute; right: clamp(18px,5vw,72px); bottom: 20px; left: clamp(18px,5vw,72px); z-index: 30; padding: 10px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: 0 10px 32px rgba(0,0,0,.16); backdrop-filter: blur(16px); }.reply-preview { display: flex; justify-content: space-between; gap: 10px; margin: -2px 0 8px; padding: 6px 8px; border-radius: 7px; color: var(--fg-secondary); background: var(--accent-muted); font-size: 9px; }.reply-preview span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.reply-preview button { border: 0; color: var(--fg-secondary); background: none; cursor: pointer; }.composer-row { display: flex; align-items: flex-end; gap: 8px; margin-top: 8px; }.composer-row textarea { min-height: 38px; max-height: 150px; flex: 1; resize: vertical; padding: 9px 10px; border: 0; outline: 0; color: var(--fg); background: transparent; font: 13px/1.5 var(--font-body); }.send-button { width: 34px; height: 34px; border: 0; border-radius: 9px; color: #fff; background: var(--accent); font-size: 17px; cursor: pointer; }.send-button:disabled { opacity: .4; cursor: not-allowed; }.composer-status { margin: 5px 3px 0; color: var(--fg-tertiary); font-size: 9px; }
-@media(max-width:768px){.session-panel{display:none}.mobile-back{display:block}.conversation-header{padding:0 12px}.header-actions .session-state{display:none}.header-actions button{padding:6px}.messages{padding:18px 14px 180px}.composer-shell{right:10px;bottom:10px;left:10px}.event-meta time{display:none}}
+.team-session-layout { height: 100dvh; min-height: 0; display: flex; position: relative; color: var(--fg); background: var(--bg); overflow: hidden; }.session-panel { width: var(--session-list-width); flex: 0 0 var(--session-list-width); display: flex; flex-direction: column; border-right: 1px solid var(--sidebar-border, var(--border)); background: var(--surface); }.session-panel-header { min-height: 66px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px 10px 16px; border-bottom: 1px solid var(--border); box-sizing: border-box; }.session-panel-header > div { min-width: 0; display: grid; gap: 4px; }.session-panel-header strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; }.session-panel-header small { color: var(--fg-tertiary); font-size: 9px; }.session-panel-header a { color: var(--accent); font-size: 20px; text-decoration: none; }.filters { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 5px 9px 8px; }.filters select { min-width: 0; padding: 7px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-secondary); background: var(--bg); font-size: 9px; }.session-list { min-height: 0; flex: 1; overflow-y: auto; padding: 4px 8px 14px; }.session-list a { min-height: 54px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border-radius: 8px; color: inherit; text-decoration: none; }.session-list a:hover,.session-list a.active { background: var(--surface-hover); }.session-list a.active { box-shadow: inset 2px 0 var(--accent); }.session-list a > div { min-width: 0; display: grid; gap: 4px; }.session-list strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.session-list small { color: var(--fg-tertiary); font-size: 9px; }.state-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--fg-tertiary); }.state-dot.active { background: var(--success); }.state-dot.paused { background: var(--warning); }.conversation { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; position: relative; }.conversation-header { min-height: 62px; display: flex; align-items: center; gap: 12px; padding: 0 18px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 92%, transparent); box-sizing: border-box; }.title-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }.title-copy span { color: var(--fg-tertiary); font-size: 9px; }.title-copy strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }.header-actions { display: flex; align-items: center; gap: 6px; }.header-actions button,.session-state { padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-secondary); background: transparent; font-size: 9px; }.header-actions button { cursor: pointer; }.header-actions button.active { color: var(--accent); background: var(--accent-muted); }.session-state.active { color: var(--success); }.session-state.paused { color: var(--warning); }.mobile-back { display: none; color: var(--fg); font-size: 25px; text-decoration: none; }.return-notice,.error-banner { padding: 7px 16px; border-bottom: 1px solid var(--border); color: var(--fg-secondary); background: var(--surface); font-size: 10px; }.error-banner { color: var(--error); }.messages { min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; overflow-x: hidden; padding: 24px var(--session-content-gutter) 190px; scrollbar-gutter: stable; }.event { display: flex; flex-direction: column; gap: 6px; }.event-meta { display: flex; justify-content: space-between; color: var(--fg-tertiary); font: 9px var(--font-mono); }.reference { text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; align-self: flex-start; padding: 3px 7px; border: 0; border-radius: 6px; color: var(--accent); background: var(--accent-muted); font-size: 9px; cursor: pointer; }.event-actions { min-height: 18px; display: flex; justify-content: flex-end; gap: 9px; color: var(--fg-tertiary); font-size: 9px; opacity: .72; }.event-actions button { border: 0; color: var(--fg-tertiary); background: none; font-size: 9px; cursor: pointer; }.event-actions button:hover { color: var(--accent); }.system-event { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }.system-event strong { color: var(--fg-secondary); font-size: 10px; }.system-event span { white-space: pre-wrap; color: var(--fg-tertiary); font-size: 10px; line-height: 1.6; }.empty { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--fg-tertiary); font-size: 11px; text-align: center; }.empty strong { color: var(--fg-secondary); font-size: 14px; }.composer-shell { position: absolute; right: var(--session-content-gutter); bottom: 20px; left: var(--session-content-gutter); z-index: 30; padding: 10px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: 0 10px 32px rgba(0,0,0,.16); backdrop-filter: blur(16px); }.reply-preview { display: flex; justify-content: space-between; gap: 10px; margin: -2px 0 8px; padding: 6px 8px; border-radius: 7px; color: var(--fg-secondary); background: var(--accent-muted); font-size: 9px; }.reply-preview span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.reply-preview button { border: 0; color: var(--fg-secondary); background: none; cursor: pointer; }.composer-row { display: flex; align-items: flex-end; gap: 8px; margin-top: 8px; }.composer-row textarea { min-height: 38px; max-height: 150px; flex: 1; resize: vertical; padding: 9px 10px; border: 0; outline: 0; color: var(--fg); background: transparent; font: 13px/1.5 var(--font-body); }.send-button { width: 34px; height: 34px; border: 0; border-radius: 9px; color: #fff; background: var(--accent); font-size: 17px; cursor: pointer; }.send-button:disabled { opacity: .4; cursor: not-allowed; }.composer-status { margin: 5px 3px 0; color: var(--fg-tertiary); font-size: 9px; }
+@media(max-width:768px){.session-panel{display:none}.mobile-back{display:block}.conversation-header{padding:0 12px}.header-actions .session-state{display:none}.header-actions button{padding:6px}.messages{padding-block:18px 180px}.composer-shell{right:10px;bottom:10px;left:10px}.event-meta time{display:none}}
 
 /* Shared conversation layout from team-collaboration.html. */
 .conversation-header { height:62px; min-height:62px; flex:0 0 auto; padding:0 18px; background:var(--bg); }
@@ -321,13 +419,13 @@ onBeforeUnmount(()=>{document.removeEventListener('click',closeMore);historyGene
 .task-strip { min-height:34px; display:flex; align-items:center; gap:8px; padding:5px 20px; border-bottom:1px solid var(--border); color:var(--fg-secondary); font-size:11px; }.task-strip button { color:var(--accent); border:0; background:none; cursor:pointer; font:inherit; }.task-strip > span { padding:3px 7px; background:var(--surface-active); border-radius:5px; font-size:10px; }
 .people-strip { display:flex; flex:0 0 auto; align-items:center; gap:8px; padding:10px 20px; border-bottom:1px solid var(--border); overflow-x:auto; white-space:nowrap; font-size:11px; }.people-strip button { flex:none; border:0; background:none; padding:5px 0; color:var(--accent); font:inherit; cursor:pointer; }.people-strip .agent-chip { display:flex; align-items:center; gap:5px; padding:6px 8px; border:1px solid var(--border); border-radius:5px; color:var(--fg-secondary); background:var(--surface); font-size:10px; }.agent-chip i { width:5px; height:5px; border-radius:50%; background:var(--fg-tertiary); }.agent-chip i.online { background:var(--success); }.participant-avatars { display:flex; gap:3px; }.participant-avatars span { display:grid; place-items:center; width:21px; height:21px; border:1px solid var(--border-light); border-radius:50%; color:var(--accent); background:var(--accent-muted); font-size:10px; }.strip-divider { height:18px; width:1px; flex:none; background:var(--border); margin:0 3px; }.people-strip button.active { color:var(--fg); }.people-strip > button:nth-last-child(3),.people-strip > button:nth-last-child(2) { border:1px solid var(--border); border-radius:6px; padding:8px 12px; color:var(--fg-secondary); }
 .session-filter-notice { flex:none; display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:7px 18px; background:var(--accent-subtle); border-bottom:1px solid var(--border); color:var(--fg-secondary); font-size:11px; }.session-filter-notice button { border:0; background:none; color:var(--accent); cursor:pointer; font:inherit; }
-.messages { gap:14px; padding:24px max(20px,calc(50% - 460px)) calc(var(--composer-reserve,190px) + 45px); }.event { display:flex; flex-direction:row; gap:11px; margin:0; max-width:none; }.event-body { flex:1; min-width:0; }.message-avatar { flex:0 0 27px; width:27px; height:27px; display:grid; place-items:center; border-radius:50%; color:var(--accent); background:var(--accent-muted); border:1px solid var(--border-light); font-size:11px; }.message-avatar.agent { border-radius:7px; color:var(--fg); background:var(--surface-active); font:11px var(--font-mono); }.event-meta { font-size:11px; color:var(--fg-secondary); margin:0 0 7px; justify-content:flex-start; gap:9px; }.event-meta span { color:var(--fg); font-weight:550; }.event-meta time { font-size:10px; color:var(--fg-tertiary); }
+.messages { gap:14px; padding:24px var(--session-content-gutter) calc(var(--composer-reserve,190px) + 45px); }.event { display:flex; flex-direction:row; gap:11px; margin:0; max-width:none; }.event-body { flex:1; min-width:0; }.message-avatar { flex:0 0 27px; width:27px; height:27px; display:grid; place-items:center; border-radius:50%; color:var(--accent); background:var(--accent-muted); border:1px solid var(--border-light); font-size:11px; }.message-avatar.agent { border-radius:7px; color:var(--fg); background:var(--surface-active); font:11px var(--font-mono); }.event-meta { font-size:11px; color:var(--fg-secondary); margin:0 0 7px; justify-content:flex-start; gap:9px; }.event-meta span { color:var(--fg); font-weight:550; }.event-meta time { font-size:10px; color:var(--fg-tertiary); }
 .event :deep(.msg-user) { max-width:100%; width:100%; box-sizing:border-box; color:var(--fg); background:var(--surface); border:1px solid var(--border); border-radius:0 8px 8px 8px; font-size:13px; line-height:1.85; padding:12px 15px; }.event :deep(.msg-agent) { width:100%; max-width:none; padding:0; }.event :deep(.block-role) { display:none; }.event :deep(.agent-body) { font-size:13px; line-height:1.8; }.event-actions { margin-top:8px; gap:8px; font-size:10px; }.event-actions button { margin-left:auto; color:var(--fg-secondary); }.event:not(.member_message):not(.agent_message) { color:var(--fg-secondary); font-size:11px; padding-left:39px; }.event:not(.member_message):not(.agent_message) .event-meta { display:none; }
-.composer-shell { left:max(20px,calc(50% - 460px)); right:max(20px,calc(50% - 460px)); bottom:18px; padding:0; border:0; background:none; box-shadow:none; border-radius:0; }.composer-container { padding:0; background:var(--surface); border:1px solid var(--border-light); border-radius:var(--radius-xl); box-shadow:var(--shadow-md); }.textarea-resize-handle { height:6px; margin:4px 8px 0; cursor:ns-resize; display:flex; align-items:center; justify-content:center; }.textarea-resize-handle::after { content:''; width:32px; height:3px; border-radius:2px; background:var(--border-light); }.composer-row { display:block; padding:0; margin:0; }.composer-row textarea { width:100%; min-height:64px; max-height:400px; box-sizing:border-box; padding:13px 16px 5px; margin:0; border:0; background:none; resize:none; color:var(--fg); font:14px/1.55 var(--font-body); outline:none; }.composer-controls { display:flex; align-items:center; gap:8px; padding:8px 12px 11px; }.composer-context { margin-left:auto; color:var(--fg-tertiary); font:11px var(--font-mono); white-space:nowrap; }.send-button { width:32px; height:32px; flex:0 0 32px; border-radius:50%; font-size:18px; padding:0; }.composer-status { font-size:10px; margin:8px 0 0; color:var(--fg-tertiary); line-height:1.6; }
-@media(max-width:768px){.conversation-header{padding:0 12px}.session-id-box{display:none}.messages{padding:20px 14px calc(var(--composer-reserve,190px) + 30px)}.event{gap:8px}.people-strip{padding:10px 13px}.task-strip{padding:8px 13px}.composer-shell{left:12px;right:12px;bottom:12px}.composer-context{display:none}.composer-controls{gap:5px}.send-button{width:32px;height:32px}.conversation-header .session-state{display:inline-flex}}
+.composer-shell { left:var(--session-content-gutter); right:var(--session-content-gutter); bottom:18px; padding:0; border:0; background:none; box-shadow:none; border-radius:0; }.composer-container { padding:0; background:var(--surface); border:1px solid var(--border-light); border-radius:var(--radius-xl); box-shadow:var(--shadow-md); }.textarea-resize-handle { height:6px; margin:4px 8px 0; cursor:ns-resize; display:flex; align-items:center; justify-content:center; }.textarea-resize-handle::after { content:''; width:32px; height:3px; border-radius:2px; background:var(--border-light); }.composer-row { display:block; padding:0; margin:0; }.composer-row textarea { width:100%; min-height:64px; max-height:400px; box-sizing:border-box; padding:13px 16px 5px; margin:0; border:0; background:none; resize:none; color:var(--fg); font:14px/1.55 var(--font-body); outline:none; }.composer-controls { display:flex; align-items:center; gap:8px; padding:8px 12px 11px; }.composer-context { margin-left:auto; color:var(--fg-tertiary); font:11px var(--font-mono); white-space:nowrap; }.send-button { width:32px; height:32px; flex:0 0 32px; border-radius:50%; font-size:18px; padding:0; }.composer-status { font-size:10px; margin:8px 0 0; color:var(--fg-tertiary); line-height:1.6; }
+@media(max-width:768px){.conversation-header{padding:0 12px}.session-id-box{display:none}.messages{padding-block:20px calc(var(--composer-reserve,190px) + 30px)}.event{gap:8px}.people-strip{padding:10px 13px}.task-strip{padding:8px 13px}.composer-shell{left:12px;right:12px;bottom:12px}.composer-context{display:none}.composer-controls{gap:5px}.send-button{width:32px;height:32px}.conversation-header .session-state{display:inline-flex}}
 .side-panel-backdrop { position:fixed; inset:0; z-index:109; background:var(--overlay); backdrop-filter:blur(2px); }
 .event-meta { font-family:var(--font-body); }.event-meta small { color:var(--fg-secondary); font-size:11px; }.event-actions .context-receipt { margin-left:0; color:var(--accent); }.event-actions button:last-child { margin-left:auto; }.system-event { display:block; border:0; background:none; padding:0; text-align:center; font-size:11px; line-height:1.8; }.system-event strong { display:none; }.system-event span { font-size:11px; }.people-strip { padding:7px 18px; min-height:44px; box-sizing:border-box; }.people-strip .agent-chip { border-color:transparent; background:var(--surface-active); padding:4px 7px; }.people-strip>button:nth-last-child(3),.people-strip>button:nth-last-child(2) { padding:4px 8px; border-color:transparent; background:none; font-size:11px; }.materials-button { border:1px solid var(--border); border-radius:6px; padding:5px 8px; color:var(--fg-secondary); background:none; font:11px var(--font-body); cursor:pointer; }.composer-shell { bottom:20px; }.composer-status { display:flex; justify-content:space-between; }
-@media(max-width:768px){.event :deep(.msg-user),.event :deep(.agent-body){font-size:12px}.composer-row textarea{font-size:16px}.people-strip{padding:6px 12px}.messages{padding:14px 12px calc(var(--composer-reserve,190px) + 30px);gap:12px}.composer-status{display:none}.composer-shell{bottom:12px}}
+@media(max-width:768px){.event :deep(.msg-user),.event :deep(.agent-body){font-size:12px}.composer-row textarea{font-size:16px}.people-strip{padding:6px 12px}.messages{padding-block:14px calc(var(--composer-reserve,190px) + 30px);gap:12px}.composer-status{display:none}.composer-shell{bottom:12px}}
 .people-strip { flex-wrap:wrap; overflow:visible; white-space:normal; }
 .people-strip button { white-space:nowrap; }
 @media(max-width:768px) { .people-strip { gap:6px; }.people-strip .strip-divider { display:none; }.materials-button { margin-left:auto; } }
@@ -346,4 +444,10 @@ onBeforeUnmount(()=>{document.removeEventListener('click',closeMore);historyGene
 .composer-tool:hover:not(:disabled),.materials-button:hover { background:var(--surface-hover); }
 .composer-tool:disabled { opacity:.45; cursor:not-allowed; }
 @media(max-width:768px) { .team-session-layout { height:100dvh; }.event.member_message .event-body { max-width:88%; }.composer-tool,.materials-button { min-height:44px; } }
+@media(max-width:768px) {
+  .composer-controls { display:grid; grid-template-columns:auto 1fr auto; }
+  .composer-status.composer-problem { display:block; }
+}
+.event-actions .post-assignment{color:var(--accent);margin-left:0}.event-actions button:last-child{margin-left:0;min-width:32px}
+.post-options{display:grid}.post-options button{min-height:44px;padding:10px 14px;text-align:start;border:0;border-radius:6px;color:var(--fg);background:none}.post-options button:hover{background:var(--surface-hover)}
 </style>

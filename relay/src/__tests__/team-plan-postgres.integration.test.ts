@@ -1,3 +1,7 @@
+import {execFileSync} from 'node:child_process'
+import {mkdtempSync,rmSync,writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 import {TeamTaskService} from '../team/task-service.js'
 import { TeamTaskBudgetRepository } from '../team/budget-repository.js'
 import { requireTaskBudgetCapacity, type TaskBudgetPolicy } from '../team/budget-service.js'
@@ -567,8 +571,9 @@ const enabled = process.env.RUN_POSTGRES_INTEGRATION === '1' && Boolean(process.
     const activation: PlanControlInput = { request_id: 'activate', expected_revision: 0, plan_revision: 1, action: 'activate', invocation_limit: 3 }
     return { ...f, controls, activation, call }
   }
-  async function schedulerFixture(customize?: (input: TaskPlanInput) => void, budget?: TaskBudgetPolicy, invocationLimit = 3) {
+  async function schedulerFixture(customize?: (input: TaskPlanInput) => void, budget?: TaskBudgetPolicy, invocationLimit = 3, setup?: (f:Awaited<ReturnType<typeof controlFixture>>)=>Promise<void>) {
     const f = await controlFixture()
+    if(setup)await setup(f)
     f.activation.invocation_limit = invocationLimit
     if (customize) {
       const input = structuredClone(f.input); customize(input)
@@ -583,6 +588,69 @@ const enabled = process.env.RUN_POSTGRES_INTEGRATION === '1' && Boolean(process.
       return scheduler.process(claim!)
     } }
   }
+  test('code attempts get a fenced lease, an isolated native session and grant rechecks on input reads', async () => {
+    const step = { repository:'team/project', base_sha:'a'.repeat(40), grant_revision:'f'.repeat(64), paths:['web'], tools:['git'],kind:'develop' as const }
+    const f=await schedulerFixture(plan=>{plan.steps[0].code=step},undefined,3,async f=>{
+    const grant={...step,team_id:f.teamId,offer_id:f.offer}
+    await pool.query('UPDATE daemons SET agents=$2::jsonb WHERE daemon_id=$1',[f.daemon,JSON.stringify([{type:'codex',manageable:true,team_config:{code_workspaces:[grant]}}])])
+    })
+    const reserved=await f.next()
+    const dispatch=new TeamDispatchRepository(pool,undefined,()=>true)
+    const command=await dispatch.claim(reserved.call_id!)
+    expect(command?.authorization.operation).toBe('create')
+    expect(command?.authorization.delivery?.code).toMatchObject({repository:step.repository,lease_generation:expect.any(Number)})
+    const native='isolated-'+randomUUID()
+    expect(await dispatch.bindNativeSession(reserved.call_id!,f.daemon,f.users[0],native)).toBe(true)
+    expect((await pool.query('SELECT native_session_id FROM collaboration_session_agent_bindings WHERE offer_id=$1',[f.offer])).rows[0].native_session_id).not.toBe(native)
+    expect((await pool.query('SELECT call_id FROM team_code_workspace_leases WHERE attempt_id=$1',[reserved.attempt_id])).rows[0].call_id).toBe(reserved.call_id)
+    await pool.query("UPDATE daemons SET agents='[]'::jsonb WHERE daemon_id=$1",[f.daemon])
+    await expect(new TeamStepInputService(pool).getManifest(reserved.call_id!,f.daemon,f.users[0])).rejects.toMatchObject({code:'capability_not_supported'})
+  })
+
+  test('code submissions carry real Git bytes and final acceptance follows the latest trusted check for that submission',async()=>{
+    const repo=mkdtempSync(join(tmpdir(),'pocketctl-plan-code-'))
+    try {
+      const git=(...args:string[])=>execFileSync('git',['-c','core.hooksPath=/dev/null','-c','user.name=Test','-c','user.email=test@localhost','-c','commit.gpgSign=false','-C',repo,...args],{env:{...process.env,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1'}})
+      git('init','--quiet','--template=');writeFileSync(join(repo,'README'),'base');git('add','README');git('commit','-qm','base')
+      const base=git('rev-parse','HEAD').toString().trim()
+      const step={repository:'fixture/repository',base_sha:base,grant_revision:'f'.repeat(64),paths:['web'],tools:['git'],kind:'develop' as const}
+      const f=await schedulerFixture(plan=>{plan.steps=plan.steps.slice(0,2);plan.steps[0].code=step;plan.steps[1].code={...step,kind:'merge'}},undefined,3,async f=>{
+        await pool.query('UPDATE daemons SET agents=$2::jsonb WHERE daemon_id=$1',[f.daemon,JSON.stringify([{type:'codex',manageable:true,team_config:{code_workspaces:[{...step,team_id:f.teamId,offer_id:f.offer}]}}])])
+      })
+      for(const kind of ['develop','merge']){
+        writeFileSync(join(repo,'web'),kind);git('add','web');git('commit','-qm',kind)
+        const head=git('rev-parse','HEAD').toString().trim(),bundle=git('bundle','create','-','HEAD','^'+base)
+        const reserved=await f.next(),dispatcher=new TeamDispatchRepository(pool,undefined,()=>true)
+        const claim=await dispatcher.claim(reserved.call_id!)
+        expect(claim?.authorization.delivery?.code?.kind).toBe(kind)
+        await dispatcher.bindNativeSession(reserved.call_id!,f.daemon,f.users[0],'test-native-'+randomUUID())
+        await pool.query("UPDATE collaboration_calls SET state='completed',finished_at=NOW() WHERE call_id=$1",[reserved.call_id])
+        const spec=claim!.authorization.delivery!.spec_revision,service=new TeamDeliveryService(pool,{writesEnabledForTeam:()=>true,stepWritesEnabledForTeam:()=>true}).forAttempt(reserved.attempt_id!)
+        const manifest=Buffer.from(JSON.stringify({scope:claim!.authorization.delivery!.code,repository:step.repository,base_sha:base,head_sha:head,source_call_id:reserved.call_id,attempt_id:reserved.attempt_id,bundle_sha256:artifactDigest(bundle),bundle_bytes:bundle.length}))
+        const files=[{id:'team-code-bundle',data:bundle,name:'code.bundle',mime_type:'application/x-git-bundle'},{id:'team-code-manifest',data:manifest,name:'code.json',mime_type:'application/json'}]
+        const prepared=await service.prepare(f.task,f.users[0],{request_id:'prepare-'+kind,expected_revision:1,spec_revision:spec,source_call_id:reserved.call_id!,summary:kind,code_revision:head,publish_scope:'team',contribution_ids:[],
+          artifacts:files.map(file=>({id:file.id,name:file.name,mime_type:file.mime_type,byte_size:file.data.length,sha256:artifactDigest(file.data),required:true})),
+          evidence:[{check_id:'unit',result:'passed',source_kind:'agent_claim',artifact_id:'team-code-manifest',code_revision:head}]})
+        for(const file of files)await service.uploadArtifact(f.task,f.users[0],prepared.submission_id,file.id,file.data)
+        await service.publish(f.task,f.users[0],prepared.submission_id,{request_id:'publish-'+kind,expected_revision:1})
+        const accept=async()=>{const delivery=await service.getDelivery(f.task,f.users[1]);return service.decide(f.task,f.users[1],{request_id:randomUUID(),expected_revision:delivery.revision,spec_revision:spec,submission_id:prepared.submission_id,decision:'accepted',verified_checks:['unit'],reason:''})}
+        if(kind==='merge'){
+          await expect(accept()).rejects.toMatchObject({code:'evidence_required'})
+          const token='test-git-connector-token-0123456789012'
+          const connector={id:randomUUID(),team_id:f.teamId,principal_user_id:f.users[0],kind:'ci' as const,repository:step.repository,checks:['unit'],token_sha256:artifactDigest(Buffer.from(token))}
+          const evidence=new TeamEvidenceService(pool,[connector],()=>true)
+          const report=(sha:string,result:'passed'|'failed')=>evidence.receive(f.task,connector.id,'Evidence '+token,{submission_id:prepared.submission_id,spec_revision:spec,repository:step.repository,code_revision:sha,run_id:randomUUID(),check_id:'unit',result,report_base64:manifest.toString('base64'),report_sha256:artifactDigest(manifest),publish_scope:'team',expires_at:new Date(Date.now()+60000).toISOString()})
+          await expect(report(base,'passed')).rejects.toThrow()
+          await report(head,'passed');await report(head,'failed')
+          await expect(accept()).rejects.toMatchObject({code:'evidence_required'})
+          expect((await service.getDelivery(f.task,f.users[1])).submissions[0].trusted_passed_checks).toEqual([])
+          await report(head,'passed')
+        }
+        await accept()
+      }
+    } finally {rmSync(repo,{recursive:true,force:true})}
+  })
+
   async function acceptScheduled(f: Awaited<ReturnType<typeof schedulerFixture>>, result: Awaited<ReturnType<TeamStepScheduler['process']>>, decision: 'accepted' | 'changes_requested' | null = 'accepted') {
     const dispatch = await new TeamDispatchRepository(pool, undefined, id=>id===f.teamId).claim(result.call_id!)
     expect(dispatch).not.toBeNull()

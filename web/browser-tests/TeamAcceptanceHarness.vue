@@ -2,7 +2,7 @@
  <div class="design-shell"><main class="design-surface teams-page"><h1>Team 本地组件回归 · 合成数据</h1>
  <p>未连接 Relay；模拟传输即使断线也能响应，用于检查页面是否阻止写入。</p>
  <p role="status">写请求次数：{{ writes }} · 已保存说明：{{ saved.background }}</p>
- <TeamAgentTargetPicker v-model="target" :bindings="bindings" :members="members" />
+ <div class="harness-composer"><TeamAgentTargetPicker v-model="target" v-model:text="draft" :bindings="bindings" :members="members" :participant-ids="[1]" :height="64" :disabled="false" placeholder="发到群里，@ 成员或 Agent" /></div>
  <TeamTasksPanel team-id="local-team" :team-creator-id="1" :current-user-id="1" :writes-enabled="true" :members="members" />
  </main></div>
 </template>
@@ -20,6 +20,7 @@ const writes=ref(0)
 const saved=ref({id:'local-task',team_id:'local-team',creator_user_id:1,title:'QA 本地离线任务',background:'ONLINE-ORIGINAL',state:'in_progress',holder_user_ids:[1],session_ids:[],revision:1,has_delivery_contract:false} as TeamTask)
 const members=[{id:'local-member',team_id:'local-team',user_id:1,display_label:'本地验收人',state:'active',revision:1,joined_at:'2026-10-30T00:00:00Z',ended_at:null}] as TeamMember[]
 const bindings=['codex','claude-code'].map((provider,i)=>({id:`binding-${i}`,offer_id:`offer-${i}`,owner_user_id:1,daemon_id:'local-host',provider,state:'active',revision:1,native_session_id:null,availability:i?'offline':'online'})) as TeamSessionAgentBinding[]
+const draft=ref('')
 const target=ref<TeamAgentTargetValue>({mode:'discussion',offerIDs:[]})
 const previousFetch=window.fetch
 const auth=useAuth(), previousUser=auth.user.value
@@ -40,4 +41,8 @@ onBeforeUnmount(()=>{window.fetch=previousFetch;auth.user.value=previousUser})
 </script>
 <style>
 body{margin:0;background:#f6f8fa;color:#17212d;font-family:system-ui}main{max-width:1100px;margin:auto;padding:40px}h1{font-size:22px}.target-picker{margin:250px 0 30px}.task-actions button:disabled,button:disabled{opacity:.5;cursor:not-allowed}
+</style>
+
+<style scoped>
+.harness-composer{max-width:520px;margin:240px 0 16px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}
 </style>

@@ -15,7 +15,7 @@ export type TeamAgentAvailability = 'online' | 'offline' | 'unsupported' | 'unma
 export type TeamTaskState = 'open' | 'in_progress' | 'completed' | 'archived' | 'deleted'
 export type TeamSessionState = 'active' | 'paused' | 'ended' | 'archived'
 export type TeamRunState = 'ready' | 'running' | 'waiting_input' | 'blocked' | 'paused' | 'completed' | 'failed' | 'cancelled'
-export type TeamMessageTargetMode = 'offers' | 'all' | 'discussion'
+export type TeamMessageTargetMode = 'offers' | 'all' | 'discussion' | 'readonly_offer'
 export const TEAM_PROVIDERS = ['codex', 'claude-code', 'dsh'] as const
 export type TeamProvider = typeof TEAM_PROVIDERS[number]
 export function isTeamProvider(value: unknown): value is TeamProvider {
@@ -133,7 +133,10 @@ export interface TeamSessionParticipant {
   revision: number
 }
 
+export interface TeamCodeScope { repository:string; base_sha:string; grant_revision:string; paths:string[]; tools:string[] }
+export interface TeamCodeStep extends TeamCodeScope {kind:'develop'|'merge'|'verify'}
 export interface TeamSessionAgentBinding {
+  code_workspaces?:TeamCodeScope[]
   id: string
   offer_id: TeamAgentOfferID
   owner_user_id: number
@@ -143,10 +146,13 @@ export interface TeamSessionAgentBinding {
   revision: number
   native_session_id: string | null
   availability: TeamAgentAvailability
+  read_only_question?: boolean
   config?:SessionAgentConfig
 }
 
 export interface TeamSessionSummary {
+  group_plans?:boolean
+  group_assignments?:boolean
   current_user_role?: TeamRole
   id: TeamSessionID
   team_id: TeamID

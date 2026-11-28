@@ -12,9 +12,10 @@ const CapabilityTeamStepsV1 = "team_task_steps_v1"
 // TeamDeliveryBinding is a Relay-authored capability binding, never inferred
 // from natural-language context or an Agent-generated submission manifest.
 type TeamDeliveryBinding struct {
-	TaskID       string `json:"task_id"`
-	SpecRevision int64  `json:"spec_revision"`
-	AttemptID    string `json:"attempt_id,omitempty"`
+	Code         *TeamCodeStep `json:"code,omitempty"`
+	TaskID       string        `json:"task_id"`
+	SpecRevision int64         `json:"spec_revision"`
+	AttemptID    string        `json:"attempt_id,omitempty"`
 }
 
 var teamDeliveryAttemptID = regexp.MustCompile(`^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$`)

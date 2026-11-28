@@ -67,6 +67,25 @@ function validConfig(value: unknown): boolean {
 }
 
 export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependencies): void {
+  const assignments = '/api/team/sessions/:sessionId/assignments'
+  for (const [suffix,key] of [['/:id','id'],['/by-source/:id','source'],['/by-request/:id','request']] as const) {
+    app.get(assignments+suffix,async(request,reply)=>{
+      const identity=await actor(request.headers.authorization,reply,deps); if ('error' in identity) return identity.error
+      reply.header('Cache-Control','no-store')
+      try { return {assignment:await deps.service.assignments.find(param(request.params,'sessionId'),identity.userId,key,param(request.params,'id'))} }
+      catch (error) {return mapError(error,reply)}
+    })
+  }
+  for (const [method,suffix,action] of [['POST','','open'],['PATCH','/:id','edit'],['POST','/:id/confirm','confirm']] as const) {
+    app.route({method,url:assignments+suffix,handler:async(request,reply)=>{
+      const identity=await actor(request.headers.authorization,reply,deps); if ('error' in identity) return identity.error
+      const disabled=writable(reply,deps); if(disabled)return disabled
+      const parsed=mutation(request.body,reply,action!=='open'); if('error' in parsed)return parsed.error
+      reply.header('Cache-Control','no-store')
+      try { return {assignment:await deps.service.assignments.mutate(param(request.params,'sessionId'),identity.userId,action,param(request.params,'id'),parsed.parsed)} }
+      catch (error) {return mapError(error,reply)}
+    }})
+  }
   app.post('/api/team/sessions/:sessionId/tasks/:taskId/execute', async (request, reply) => {
     const identity = await actor(request.headers.authorization, reply, deps); if ('error' in identity) return identity.error
     const disabled = writable(reply, deps); if (disabled) return disabled
@@ -200,9 +219,15 @@ export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependenci
     if(rawTargets!==undefined && (!Array.isArray(rawTargets)||!rawTargets.every((id:unknown)=>typeof id==='string')))return fail(reply,400,'invalid_request','target_offer_ids must contain strings')
     const targetOfferIds = (rawTargets??[]) as string[]
     const referenceEventId = parsed.parsed.reference_event_id === undefined || parsed.parsed.reference_event_id === null ? null : typeof parsed.parsed.reference_event_id === 'string' ? parsed.parsed.reference_event_id : undefined
-    if (!content || content.length > 64_000 || !['offers', 'all', 'discussion'].includes(targetMode) || referenceEventId === undefined) return fail(reply, 400, 'invalid_request', 'message content or targets are invalid')
+    if (!content || content.length > 64_000 || !['offers', 'all', 'discussion', 'readonly_offer'].includes(targetMode) || referenceEventId === undefined) return fail(reply, 400, 'invalid_request', 'message content or targets are invalid')
+    const contextVersion = parsed.parsed.context_version
+    if (targetMode === 'readonly_offer' && (targetOfferIds.length !== 1 || !targetOfferIds[0]?.trim()
+      || !Number.isSafeInteger(contextVersion) || Number(contextVersion) < 0)) {
+      return fail(reply, 400, 'invalid_request', 'Read-only questions require one Agent and the current Context version')
+    }
     try {
-      const result = await deps.service.appendMessage({ sessionId: param(request.params, 'sessionId'), actorUserId: identity.userId, requestId: parsed.requestId, content, targetMode, targetOfferIds, referenceEventId })
+      const result = await deps.service.appendMessage({ sessionId: param(request.params, 'sessionId'), actorUserId: identity.userId, requestId: parsed.requestId, content, targetMode, targetOfferIds, referenceEventId,
+        ...(targetMode === 'readonly_offer' ? {contextVersion: Number(contextVersion)} : {}) })
       reply.code(201); return result
     } catch (error) { return mapError(error, reply) }
   })

@@ -1,3 +1,5 @@
+import {stableDigest} from './delivery-contract.js'
+import {requireCodeGrant,type CodeStep} from './code-step.js'
 import { createHash } from 'node:crypto'
 import type pg from 'pg'
 
@@ -13,7 +15,7 @@ export const TEAM_RECONCILE_CAPABILITY = 'team_collaboration_reconcile_v1'
 export const TEAM_COLLABORATION_PROTOCOL_VERSION = 1
 
 export interface DispatchAuthorization {
-  delivery?: { task_id: string; spec_revision: number; attempt_id?: string }
+  delivery?: { code?:CodeStep & {team_id:string;lease_generation:number}; task_id: string; spec_revision: number; attempt_id?: string }
   protocol_version: number
   operation: 'create' | 'message'
   call_id: string
@@ -56,6 +58,7 @@ export function dispatchAuthorizationMatches(
     && accounting.binding_id === authorization.binding_id && accounting.offer_id === authorization.offer_id
     && Number(accounting.binding_revision) === authorization.binding_revision
     && Number(accounting.offer_revision) === authorization.offer_revision
+    && (!accounting.code_workspace || (authorization.delivery?.code && stableDigest(accounting.code_workspace)===stableDigest(authorization.delivery.code)))
     && authorization.protocol_version === TEAM_COLLABORATION_PROTOCOL_VERSION
     && (!accounting.config_hash || (authorization.config_hash === accounting.config_hash && authorization.config_revision === Number(accounting.config_revision)))
     && authorization.daemon_id === daemonId && authorization.owner_user_id === ownerUserId)
@@ -99,6 +102,8 @@ export class TeamDispatchRepository {
        JOIN collaboration_sessions s ON s.team_session_id=c.team_session_id
        LEFT JOIN team_task_step_attempts a ON a.call_id=c.call_id
        WHERE c.state='pending' AND (a.attempt_id IS NULL OR s.team_id=ANY($2::text[]))
+       AND NOT (EXISTS(SELECT 1 FROM team_session_assignment_items i WHERE i.event_id=c.event_id)
+         AND EXISTS(SELECT 1 FROM collaboration_calls previous WHERE previous.binding_id=c.binding_id AND previous.state IN ('dispatched','accepted','uncertain')))
        ORDER BY c.created_at,c.call_id LIMIT $1`,
       [Math.max(1, Math.min(500, Math.trunc(limit))), enabledTeams],
     )
@@ -127,7 +132,7 @@ export class TeamDispatchRepository {
                 binding.native_session_id AS binding_native_session_id, binding.applied_revision AS binding_applied_revision, binding.applied_config AS binding_applied_config, binding.owner_user_id AS binding_owner_user_id,
                 offer.revision AS current_offer_revision, offer.state AS offer_state, offer.provider,
                 offer.daemon_id, offer.owner_user_id, member.state AS membership_state,
-                daemon.status AS daemon_status, daemon.collaboration_capabilities, frozen.task_id AS delivery_task_id,frozen.spec_revision AS delivery_spec_revision,
+                daemon.status AS daemon_status,daemon.agents, daemon.collaboration_capabilities, frozen.task_id AS delivery_task_id,frozen.spec_revision AS delivery_spec_revision,
                 attempt.attempt_id AS delivery_attempt_id,session.team_id AS dispatch_team_id
          FROM collaboration_calls call
          LEFT JOIN team_call_delivery_specs frozen ON frozen.call_id=call.call_id
@@ -172,11 +177,13 @@ export class TeamDispatchRepository {
         [row.binding_id, callId],
       )
       if (conflict.rows[0]) {
+        // Confirmed group items already have stable task IDs. Wait for this binding's preceding call.
+        if((await client.query('SELECT 1 FROM team_session_assignment_items WHERE event_id=$1',[row.event_id])).rowCount) return null
         await client.query(`UPDATE collaboration_calls SET state = 'blocked', outcome = 'native_session_busy', updated_at = NOW(), finished_at = NOW() WHERE call_id = $1`, [callId])
         return null
       }
       let frozen: Awaited<ReturnType<TeamAgentConfigService['freeze']>> = null
-      if (row.config_hash) {
+      if (row.config_hash || row.execution_mode === 'discussion' || row.execution_mode === 'review') {
         if(process.env.TEAM_AGENT_CONFIG_V2!=='on'){await client.query(`UPDATE collaboration_calls SET state='blocked',outcome='team_config_disabled',finished_at=NOW() WHERE call_id=$1`,[callId]);return null}
         try {
           frozen = await new TeamAgentConfigService(this.pool).freeze(client,row.team_session_id,row.offer_id,Number(row.initiator_user_id),row.execution_mode??undefined)
@@ -185,6 +192,11 @@ export class TeamDispatchRepository {
           await client.query(`UPDATE collaboration_calls SET state='blocked',outcome='configuration_requires_confirmation',finished_at=NOW(),updated_at=NOW() WHERE call_id=$1`,[callId])
           return null
         }
+      }
+      if(row.code_workspace) {
+        try { requireCodeGrant(row.code_workspace,row.agents,row.provider,row.dispatch_team_id,row.offer_id) }
+        catch { await client.query("UPDATE collaboration_calls SET state='blocked',outcome='code_grant_changed',finished_at=NOW() WHERE call_id=$1",[callId]);return null }
+        row.binding_native_session_id=null
       }
       if (frozen && (Number(row.binding_applied_revision) !== frozen.config_revision || !row.binding_applied_config || runtimeConfigHash(row.binding_applied_config)!==frozen.config_hash) && row.binding_native_session_id) {
         await client.query(`UPDATE collaboration_session_agent_bindings SET native_session_id=NULL WHERE binding_id=$1`,[row.binding_id])
@@ -206,7 +218,7 @@ export class TeamDispatchRepository {
         nativeSessionId: row.binding_native_session_id,
         providerRequestId,
         authorization: {
-          ...(row.delivery_task_id ? {delivery: {task_id: row.delivery_task_id,spec_revision: Number(row.delivery_spec_revision), ...(row.delivery_attempt_id ? {attempt_id: row.delivery_attempt_id} : {})}} : {}),
+          ...(row.delivery_task_id ? {delivery: {...(row.code_workspace?{code:row.code_workspace}:{}),task_id: row.delivery_task_id,spec_revision: Number(row.delivery_spec_revision), ...(row.delivery_attempt_id ? {attempt_id: row.delivery_attempt_id} : {})}} : {}),
           ...(frozen ?? {}),
           ...(row.execution_mode ? {execution_mode:row.execution_mode} : {}),
           protocol_version: TEAM_COLLABORATION_PROTOCOL_VERSION,
@@ -292,12 +304,14 @@ export class TeamDispatchRepository {
          WHERE call.call_id = $1 FOR UPDATE OF call, binding`, [callId],
       )).rows[0]
       if (!row || row.daemon_id !== daemonId || Number(row.owner_user_id) !== ownerUserId || row.operation !== 'create'
-        || (row.bound_session && row.bound_session !== nativeSessionId)) return false
-      await client.query(
+        || (row.code_workspace ? row.native_session_id && row.native_session_id !== nativeSessionId : row.bound_session && row.bound_session !== nativeSessionId)) return false
+      if (!row.code_workspace) await client.query(
         `UPDATE collaboration_session_agent_bindings SET native_session_id = $2, updated_at = NOW()
          WHERE binding_id = $1 AND (native_session_id IS NULL OR native_session_id = $2)`, [row.binding_id, nativeSessionId],
       )
       await client.query(`UPDATE collaboration_calls SET native_session_id = $2, updated_at = NOW() WHERE call_id = $1`, [callId, nativeSessionId])
+      await client.query(`UPDATE collaboration_context_deliveries SET native_session_id=$2
+        WHERE call_id=$1 AND state='accepted' AND native_session_id IS NULL`,[callId,nativeSessionId])
       return true
     })
   }
@@ -308,7 +322,7 @@ export class TeamDispatchRepository {
         WHERE c.call_id=$1 AND o.daemon_id=$2 AND o.owner_user_id=$3 FOR UPDATE OF c`,[callId,daemonId,owner])).rows[0]
       if(!row?.config_hash || row.config_hash!==configHash || Number(row.config_revision)!==revision || runtimeConfigHash(config as TeamRuntimeConfig)!==configHash)return false
       await client.query(`UPDATE collaboration_calls SET applied_config=$2::jsonb,applied_config_hash=$3 WHERE call_id=$1`,[callId,JSON.stringify(config),configHash])
-      await client.query(`UPDATE collaboration_session_agent_bindings SET applied_config=$2::jsonb,applied_revision=$3,applied_call_event_seq=$4,config_status=CASE WHEN config_revision=$3 AND requested_config=$2::jsonb THEN 'applied' WHEN config_revision=$3 THEN 'pending' ELSE config_status END
+      if(!row.code_workspace) await client.query(`UPDATE collaboration_session_agent_bindings SET applied_config=$2::jsonb,applied_revision=$3,applied_call_event_seq=$4,config_status=CASE WHEN config_revision=$3 AND requested_config=$2::jsonb THEN 'applied' WHEN config_revision=$3 THEN 'pending' ELSE config_status END
         WHERE binding_id=$1 AND (applied_revision IS NULL OR applied_revision<$3 OR (applied_revision=$3 AND applied_call_event_seq<=$4))`,[row.binding_id,JSON.stringify(config),revision,Number(row.config_call_event_seq)])
       return true
     })

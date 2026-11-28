@@ -1,59 +1,58 @@
 import { mount } from '@vue/test-utils'
 import { expect, test } from 'vitest'
 import TeamAgentTargetPicker from './TeamAgentTargetPicker.vue'
-import type { TeamSessionAgentBinding } from '../../types/team'
-
-test('distinguishes same-provider recipients and preserves the selected offer', async () => {
-  const bindings: TeamSessionAgentBinding[] = [1, 2].map(id => ({
-    id: `binding-${id}`, offer_id: `offer-${id}`, owner_user_id: id,
-    daemon_id: `daemon-${id}`, provider: 'claude-code', state: 'active', revision: 1,
-    native_session_id: null, availability: 'online',
-  }))
-  const wrapper = mount(TeamAgentTargetPicker, { props: {
-    modelValue: { mode: 'all', offerIDs: [] }, bindings,
-    members: [1, 2].map(id => ({ id: `member-${id}`, team_id: 'team', user_id: id,
-      display_label: `glm-${id}`, state: 'active' as const, revision: 1,
-      joined_at: '2026-10-01T00:00:00Z', ended_at: null })),
-  } })
-  await wrapper.get('.target-trigger').trigger('click')
-  const recipient = wrapper.get('[data-offer-id="offer-2"]')
-  expect(recipient.text()).toContain('Claude Code · glm-2 · daemon-2')
-  expect(wrapper.get('[data-offer-id="offer-1"]').text()).toContain('Claude Code · glm-1 · daemon-1')
-  await recipient.trigger('click')
-  expect(wrapper.emitted('update:modelValue')).toEqual([[{ mode: 'offers', offerIDs: ['offer-2'] }]])
-  await wrapper.setProps({ modelValue: { mode: 'offers', offerIDs: ['offer-2'] } })
-  expect(wrapper.get('.target-trigger').text()).toContain('Claude Code · glm-2 · daemon-2')
+import type { TeamSessionAgentBinding, TeamMember } from '../../types/team'
+const agents:TeamSessionAgentBinding[]=[1,2,3].map(id=>({id:'b'+id,offer_id:'o'+id,owner_user_id:id,provider:'codex',daemon_id:'mac-'+id,state:'active',revision:1,native_session_id:null,availability:id===3?'offline':'online',read_only_question:id===1}))
+const members=[1,2,3].map(id=>({user_id:id,display_label:'Lin'+id,state:'active'} as TeamMember))
+function setup(){
+  return mount(TeamAgentTargetPicker,{props:{text:'',modelValue:{mode:'discussion',offerIDs:[]},bindings:agents,members,participantIds:[1,2],height:64,disabled:false,placeholder:'消息'}})
+}
+test('plain text and email stay in group chat, @ lists active participants and callable agents',async()=>{
+  const w=setup(), input=w.get('textarea')
+  for(const text of ['hello','hello@abc.com']){await input.setValue(text);expect(w.find('[role=listbox]').exists()).toBe(false)}
+  await input.setValue('请@')
+  expect(w.get('[role=listbox]').text()).toContain('Lin1')
+  expect(w.get('[role=listbox]').text()).not.toContain('Lin3')
+  expect(w.get('[role=listbox]').text()).toContain('Codex · Lin2 · mac-2')
+  await input.trigger('keydown',{key:'Escape'})
+  expect(w.find('[role=listbox]').exists()).toBe(false)
+  await input.trigger('keydown',{key:'Enter'})
+  expect(w.emitted('send')).toHaveLength(1)
 })
-
-test('allows choosing human discussion with no available Agent', async () => {
-  const wrapper = mount(TeamAgentTargetPicker, { props: { modelValue: { mode: 'all', offerIDs: [] }, bindings: [] } })
-  await wrapper.get('.target-trigger').trigger('click')
-  const buttons = wrapper.findAll('.target-menu button')
-  expect(buttons[0].attributes('disabled')).toBeDefined()
-  expect(buttons[1].attributes('disabled')).toBeUndefined()
-  await buttons[1].trigger('click')
-  expect(wrapper.emitted('update:modelValue')).toEqual([[{ mode: 'discussion', offerIDs: [] }]])
+test('selecting a member at the caret preserves the suffix without invoking an agent',async()=>{
+  const w=setup(),input=w.get('textarea')
+  await w.setProps({text:'请@Lin2 看一下'})
+  input.element.setSelectionRange(6,6)
+  await input.trigger('click')
+  await input.trigger('keydown',{key:'Enter'})
+  expect(w.emitted('update:text')?.at(-1)).toEqual(['请@Lin2 看一下'])
+  expect(w.emitted('update:modelValue')).toBeUndefined()
+  expect(w.emitted('send')).toBeUndefined()
 })
-
-test('deselects the last Agent into discussion while explicit all remains a separate action',async()=>{
- const binding:TeamSessionAgentBinding={id:'b',offer_id:'o',owner_user_id:1,daemon_id:'d',provider:'codex',state:'active',revision:1,native_session_id:null,availability:'online'}
- const wrapper=mount(TeamAgentTargetPicker,{props:{modelValue:{mode:'offers',offerIDs:['o']},bindings:[binding]}})
- await wrapper.get('.target-trigger').trigger('click');await wrapper.get('[data-offer-id="o"]').trigger('click')
- expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([{mode:'discussion',offerIDs:[]}])
- await wrapper.findAll('.target-menu>button')[0].trigger('click')
- expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([{mode:'all',offerIDs:[]}])
+test('composing Chinese never sends or selects until composition completes',async()=>{
+  const w=setup(),input=w.get('textarea')
+  await input.trigger('compositionstart');await input.setValue('@Lin')
+  await input.trigger('keydown',{key:'Enter',isComposing:true})
+  expect(w.find('[role=listbox]').exists()).toBe(false);expect(w.emitted('send')).toBeUndefined()
+  await input.trigger('compositionend');expect(w.find('[role=listbox]').exists()).toBe(true)
 })
-
-test('renders provider avatars without losing recipient identity or offline restrictions',async()=>{
- const bindings:TeamSessionAgentBinding[]=['codex','claude-code'].map((provider,i)=>({id:`b${i}`,offer_id:`o${i}`,owner_user_id:i+1,daemon_id:`host${i}`,provider:provider as TeamSessionAgentBinding['provider'],state:'active',revision:1,native_session_id:null,availability:i?'offline':'online'}))
- const w=mount(TeamAgentTargetPicker,{props:{modelValue:{mode:'discussion',offerIDs:[]},bindings}})
- await w.get('.target-trigger').trigger('click')
- expect(w.find('[data-offer-id="o0"] .agent-badge.codex svg').exists()).toBe(true)
- expect(w.find('[data-offer-id="o1"] .agent-badge.claude svg').exists()).toBe(true)
- expect(w.get('[data-offer-id="o1"]').attributes('disabled')).toBeDefined()
- await w.get('[data-offer-id="o1"]').trigger('click')
- expect(w.emitted('update:modelValue')).toBeUndefined()
- await w.get('[data-offer-id="o0"]').trigger('click')
- expect(w.emitted('update:modelValue')).toEqual([[{mode:'offers',offerIDs:['o0']}]])
- w.unmount()
+test('readonly mention selects a single offer, removing it restores discussion',async()=>{
+  const w=setup(),input=w.get('textarea')
+  await input.setValue('@mac-1')
+  const options=w.findAll('[role=option]')
+  expect(options).toHaveLength(2)
+  expect(options[1].find('.agent-badge.codex').exists()).toBe(true)
+  await options[1].trigger('click')
+  expect(w.emitted('update:modelValue')?.at(-1)).toEqual([{mode:'readonly_offer',offerIDs:['o1']}])
+  await w.setProps({modelValue:{mode:'readonly_offer',offerIDs:['o1']},text:''})
+  expect(w.get('.mention-chips').text()).toContain('mac-1')
+  await w.get('.mention-chips button').trigger('click')
+  expect(w.emitted('update:modelValue')?.at(-1)).toEqual([{mode:'discussion',offerIDs:[]}])
+})
+test('keeps distinct recipients when mentioning several agents',async()=>{
+  const w=setup()
+  await w.setProps({modelValue:{mode:'offers',offerIDs:['o1']}})
+  await w.get('textarea').setValue('@mac-2')
+  await w.get('[role=option]').trigger('click')
+  expect(w.emitted('update:modelValue')?.at(-1)).toEqual([{mode:'offers',offerIDs:['o1','o2']}])
 })

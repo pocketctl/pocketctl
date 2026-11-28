@@ -69,7 +69,7 @@ func (sm *SessionManager) restoreCollaborationClaude(auth *protocol.Collaboratio
 	if len(roots) == 0 || id == "" || strings.ContainsAny(id, `/\\`) {
 		return nil
 	}
-	agent, cwd, source, already := adapter.AgentClaude, collaborationWorkspace(roots[0], auth.BindingID), "daemon", false
+	agent, cwd, source, already := adapter.AgentClaude, collaborationWorkspace(roots[0], workspaceKey(auth)), "daemon", false
 	sm.mu.RLock()
 	if ps != nil {
 		agent, cwd, source, already = ps.Agent, ps.Cwd, ps.Source, ps.ClaudePrintSession
@@ -81,7 +81,7 @@ func (sm *SessionManager) restoreCollaborationClaude(auth *protocol.Collaboratio
 	if sm.isRetiredCollaborationSession(id, agent, cwd) {
 		return nil
 	}
-	if cwd != collaborationWorkspace(roots[0], auth.BindingID) || policy.Allows(cwd) != nil {
+	if cwd != collaborationWorkspace(roots[0], workspaceKey(auth)) || policy.Allows(cwd) != nil {
 		return nil
 	}
 	p, err := collaborationClaudePath(id)

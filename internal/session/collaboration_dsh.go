@@ -33,7 +33,7 @@ func (sm *SessionManager) restoreCollaborationDSH(auth *protocol.CollaborationAu
 	sm.mu.RLock()
 	cwd := ps.Cwd
 	sm.mu.RUnlock()
-	if cwd != collaborationWorkspace(roots[0], auth.BindingID) || policy.Allows(cwd) != nil || sm.isRetiredCollaborationSession(id, adapter.AgentDSH, cwd) {
+	if cwd != collaborationWorkspace(roots[0], workspaceKey(auth)) || policy.Allows(cwd) != nil || sm.isRetiredCollaborationSession(id, adapter.AgentDSH, cwd) {
 		return false
 	}
 	path, err := collaborationRecordPath(adapter.AgentDSH, id)

@@ -11,6 +11,7 @@ export function sameTaskBudget(a:unknown,b:TaskBudgetPolicy):boolean {
 }
 
 export interface TaskPlanStep {
+ code?:import('./team').TeamCodeStep
  step_id:string;title:string;instruction:string;acceptance:string;required:boolean;depends_on:string[];review_policy:ReviewPolicy
 }
 export interface TaskPlanSnapshot {

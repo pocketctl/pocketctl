@@ -1,3 +1,4 @@
+import {requireCodeGrant} from './code-step.js'
 import { frozenTaskRequirementsText } from './task-requirements-snapshot.js'
 import { TeamTaskBudgetRepository } from './budget-repository.js'
 import { requireTaskBudgetCapacity } from './budget-service.js'
@@ -132,7 +133,7 @@ export class TeamStepScheduler {
       try {
         const reviewer = step.review_policy.reviewer_user_id
         if (!await teamAccountsEnabled(client, [reviewer], true) || !(await client.query("SELECT 1 FROM collaboration_team_memberships WHERE team_id=$1 AND user_id=$2 AND state='active' AND role<>'viewer' FOR SHARE", [identity.team_id, reviewer])).rows[0]) throw new TeamRepositoryError('reviewer_required', 'step reviewer unavailable')
-        const offer = (await client.query(`SELECT o.offer_id,b.binding_id FROM team_agent_offers o
+        const offer = (await client.query(`SELECT o.offer_id,b.binding_id,d.agents,o.provider,d.daemon_id FROM team_agent_offers o
           JOIN collaboration_session_agent_bindings b ON b.offer_id=o.offer_id AND b.team_session_id=$1 AND b.state='active'
           JOIN collaboration_team_memberships m ON m.team_id=o.team_id AND m.user_id=o.owner_user_id AND m.state='active' AND m.role<>'viewer'
           JOIN users u ON u.id=o.owner_user_id AND u.team_enabled
@@ -141,6 +142,18 @@ export class TeamStepScheduler {
             AND d.collaboration_capabilities @> '["team_collaboration_dispatch_v1","team_collaboration_context_v1","team_task_delivery_v1","team_task_steps_v1"]'::jsonb
           FOR SHARE OF o,b,m,u,d NOWAIT`, [identity.team_session_id, identity.team_id, step.review_policy.primary_offer_id])).rows[0]
         if (!offer) throw new TeamRepositoryError('capability_not_supported', 'selected Agent cannot execute steps')
+        if (step.code) {
+          requireCodeGrant(step.code,offer.agents,offer.provider,identity.team_id,offer.offer_id)
+          await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',['team-code-slot:'+offer.daemon_id])
+          const busy=await client.query(`SELECT 1 FROM collaboration_calls c JOIN team_agent_offers o USING(offer_id)
+            LEFT JOIN team_task_plan_runtime runtime ON runtime.task_id=c.task_id
+            WHERE o.daemon_id=$1 AND c.code_workspace IS NOT NULL
+              AND (c.state IN ('pending','dispatched','accepted','uncertain') OR
+                (c.state='completed' AND runtime.state IS DISTINCT FROM 'cancelled' AND NOT EXISTS
+                  (SELECT 1 FROM team_task_submissions s WHERE s.source_call_id=c.call_id AND s.state='published')))
+            LIMIT 1`,[offer.daemon_id])
+          if(busy.rowCount)throw new TeamRepositoryError('agent_unavailable','该机器的代码执行槽仍被占用')
+        }
         if ((await client.query("SELECT 1 FROM collaboration_calls WHERE binding_id=$1 AND state IN ('pending','dispatched','accepted','uncertain') LIMIT 1", [offer.binding_id])).rows[0]) throw new TeamRepositoryError('agent_unavailable', 'selected native session is busy; retry the same wakeup')
         const selections: PlanInputSelection[] = step.depends_on.map(id => ({ step_id: id, attempt_id: latest.get(id).attempt_id, submission_id: latest.get(id).accepted_submission_id }))
         const inputs = await freezeAcceptedPlanInputs(client, claim.task_id, Number(runtime.plan_revision), step.step_id, selections)
@@ -166,7 +179,7 @@ export class TeamStepScheduler {
     const specRevision = Number((await client.query('SELECT COALESCE(MAX(revision),0)+1 AS revision FROM team_task_specs WHERE task_id=$1', [claim.task_id])).rows[0].revision)
     const callId = message.call_ids[0]
     await client.query('UPDATE collaboration_events SET request_id=NULL WHERE event_id=$1', [message.event.id])
-    await client.query('UPDATE collaboration_calls SET task_id=$2 WHERE call_id=$1', [callId, claim.task_id])
+    await client.query('UPDATE collaboration_calls SET task_id=$2,code_workspace=$3::jsonb WHERE call_id=$1', [callId, claim.task_id,step.code?JSON.stringify({...step.code,team_id:identity.team_id,input_hash:stableDigest(inputs),...(inputs.length ? {upstream:inputs.map(({step_id,attempt_id,submission_id})=>({step_id,attempt_id,submission_id}))}:{})}):null])
     await client.query(`INSERT INTO team_task_specs(task_id,revision,goal,acceptance,primary_offer_id,reviewer_user_id,required_checks,created_by_user_id)
       VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`, [claim.task_id, specRevision, step.instruction, step.acceptance, offer.offer_id, reviewer, JSON.stringify(step.review_policy.required_checks), actor])
     await client.query('INSERT INTO team_call_delivery_specs(call_id,task_id,spec_revision) VALUES($1,$2,$3)', [callId, claim.task_id, specRevision])
@@ -174,6 +187,11 @@ export class TeamStepScheduler {
     // No pre-existing domain row locks after this first queue-producing write.
     await client.query(`INSERT INTO team_task_step_attempts(attempt_id,task_id,plan_revision,step_id,attempt_no,state,call_id,lease_token,frozen_inputs,input_hash)
       VALUES($1,$2,$3,$4,$9,'reserved',$5,$6,$7::jsonb,$8)`, [attemptId, claim.task_id, runtime.plan_revision, step.step_id, callId, claim.lease_token, JSON.stringify(inputs), stableDigest(inputs), retryAttempt ? Number(retryAttempt.attempt_no) + 1 : 1])
+    if(step.code) {
+      const lease=(await client.query(`INSERT INTO team_code_workspace_leases(attempt_id,call_id,daemon_id,grant_revision)
+        SELECT $1,$2,daemon_id,$4 FROM team_agent_offers WHERE offer_id=$3 RETURNING generation`,[attemptId,callId,offer.offer_id,step.code.grant_revision])).rows[0]
+      await client.query("UPDATE collaboration_calls SET code_workspace=code_workspace || jsonb_build_object('lease_generation',$2::bigint) WHERE call_id=$1",[callId,lease.generation])
+    }
     await client.query('INSERT INTO team_step_delivery_heads(attempt_id,task_id,spec_revision) VALUES($1,$2,$3)', [attemptId, claim.task_id, specRevision])
     await client.query("INSERT INTO team_delivery_outbox(event_id,task_id,kind,payload) VALUES($1,$2,'step_reserved',$3::jsonb)", [randomUUID(), claim.task_id, JSON.stringify({ attempt_id: attemptId, call_id: callId, plan_revision: Number(runtime.plan_revision), step_id: step.step_id })])
     await new TeamTaskBudgetRepository().requireDurationCapacity(client, claim.task_id)

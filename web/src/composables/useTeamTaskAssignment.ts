@@ -5,9 +5,10 @@ import {deliveryCacheScope} from '../services/teamDeliveryCache'
 import {assignTeamTask,findTeamTaskAssignment,getTeamCapabilities,getTeamSession,listTeamMembers,TeamApiError} from '../services/teamClient'
 import {getDeliveryCapabilities} from '../services/teamDeliveryClient'
 import {matchingTaskAssignment,teamTaskAssignmentJournal,validTaskAssignment,type TaskAssignment,type TaskAssignmentResult} from '../services/teamTaskAssignmentJournal'
-import type {TeamMember,TeamSession} from '../types/team'
-export function useTeamTaskAssignment(props:{session:TeamSession;currentUserId?:number},complete:(result:TaskAssignmentResult)=>void){
+import type {TeamEvent,TeamMember,TeamSession} from '../types/team'
+export function useTeamTaskAssignment(props:{session:TeamSession;source?:TeamEvent|null;currentUserId?:number},complete:(result:TaskAssignmentResult)=>void){
  const auth=useAuth(),instruction=ref(''),acceptance=ref(''),targets=ref<string[]>([]),reviewRequired=ref(false),reviewer=ref(0),primary=ref(''),checks=ref('')
+ const referenceID=ref<string|null>(null)
  const busy=ref(false),loading=ref(false),error=ref(''),journalError=ref(''),journalReady=ref(false),verified=ref(false),revoked=ref(false),online=ref(navigator.onLine)
  const session=ref<TeamSession|null>(null),members=ref<TeamMember[]>([]),deliveryEnabled=ref(false),writesEnabled=ref(false),pending=ref<TaskAssignment|null>(null),receiptMissing=ref(false),confirmRetry=ref(false)
  let generation=0,initialized=false,scope='',origin='',actor=0,sessionId='',teamId='',disposed=false
@@ -29,11 +30,11 @@ export function useTeamTaskAssignment(props:{session:TeamSession;currentUserId?:
   if(reviewRequired.value&&(!deliveryEnabled.value||!reviewers.value.some(m=>m.user_id===reviewer.value)||!targets.value.includes(primary.value)||checkList.value.length>32||checkList.value.some(c=>c.length>120)))return '请检查验收能力、验收人、主交付 Agent 和必需检查项。'
   return ''
  })
- function clearDraft(){instruction.value='';acceptance.value='';targets.value=[];reviewer.value=0;primary.value='';checks.value='';reviewRequired.value=false}
+ function clearDraft(){referenceID.value=null;instruction.value='';acceptance.value='';targets.value=[];reviewer.value=0;primary.value='';checks.value='';reviewRequired.value=false}
  function revoke(){generation++;revoked.value=true;verified.value=false;busy.value=false;loading.value=false;session.value=null;members.value=[];pending.value=null;receiptMissing.value=false;confirmRetry.value=false;clearDraft();error.value='账号或访问权限已变化，原请求已保留，请重新打开会话。'}
  const denial=(e:unknown)=>e instanceof TeamApiError&&([401,403].includes(e.status)||e.status===404&&e.code==='team_not_found')
  function fail(e:unknown){if(!same()||denial(e)){revoke();return};verified.value=false;error.value=e instanceof Error?e.message:'暂时无法核对分派，请重试。'}
- function restore(op:TaskAssignment){pending.value=op;const i=op.input;instruction.value=i.instruction;acceptance.value=i.acceptance;targets.value=[...i.target_offer_ids];reviewRequired.value=!!i.review_policy;reviewer.value=i.review_policy?.reviewer_user_id??actor;primary.value=i.review_policy?.primary_offer_id??'';checks.value=i.review_policy?.required_checks.join('\n')??'';initialized=true}
+ function restore(op:TaskAssignment){pending.value=op;const i=op.input;referenceID.value=i.reference_event_id??null;instruction.value=i.instruction;acceptance.value=i.acceptance;targets.value=[...i.target_offer_ids];reviewRequired.value=!!i.review_policy;reviewer.value=i.review_policy?.reviewer_user_id??actor;primary.value=i.review_policy?.primary_offer_id??'';checks.value=i.review_policy?.required_checks.join('\n')??'';initialized=true}
  async function load(){
   if(!same()){revoke();return};if(loading.value||busy.value||revoked.value)return
   const g=++generation;loading.value=true;verified.value=false;error.value='';confirmRetry.value=false;receiptMissing.value=false
@@ -47,7 +48,17 @@ export function useTeamTaskAssignment(props:{session:TeamSession;currentUserId?:
    try{capability=(await getDeliveryCapabilities(teamId)).writes_enabled}catch(e){if(!(e instanceof TeamApiError&&e.status===404&&e.code!=='team_not_found'))throw e}
    if(!current(g))return
    session.value=latest;members.value=people;deliveryEnabled.value=capability;writesEnabled.value=features.writes_enabled;verified.value=true
-   if(!initialized){initialized=true;reviewRequired.value=capability;reviewer.value=actor}
+   if(!initialized){
+    initialized=true;reviewRequired.value=capability;reviewer.value=actor
+    const source=props.source
+    if(source?.team_session_id===sessionId && source.kind==='agent_message') {
+     instruction.value=source.content
+     referenceID.value=source.id
+     if(source.author_offer_id && bindings.value.some(b=>b.offer_id===source.author_offer_id && b.availability==='online')) {
+      targets.value=[source.author_offer_id];primary.value=source.author_offer_id
+     }
+    }
+   }
   }catch(e){if(g===generation)fail(e)}finally{if(g===generation)loading.value=false}
  }
  async function finish(op:TaskAssignment,result:TaskAssignmentResult,g:number,opScope:string){
@@ -69,7 +80,7 @@ export function useTeamTaskAssignment(props:{session:TeamSession;currentUserId?:
  }
  async function submit(){
   if(disabledReason.value||!session.value)return
-  const op:TaskAssignment={team:teamId,session:sessionId,actor,input:{request_id:crypto.randomUUID(),instruction:instruction.value.trim(),acceptance:acceptance.value.trim(),target_offer_ids:[...targets.value].sort(),context_version:session.value.current_context_version,...(reviewRequired.value?{review_policy:{reviewer_user_id:reviewer.value,primary_offer_id:primary.value,required_checks:[...checkList.value]}}:{})}}
+  const op:TaskAssignment={team:teamId,session:sessionId,actor,input:{request_id:crypto.randomUUID(),instruction:instruction.value.trim(),acceptance:acceptance.value.trim(),target_offer_ids:[...targets.value].sort(),context_version:session.value.current_context_version,...(referenceID.value?{reference_event_id:referenceID.value}:{}),...(reviewRequired.value?{review_policy:{reviewer_user_id:reviewer.value,primary_offer_id:primary.value,required_checks:[...checkList.value]}}:{})}}
   if(!validTaskAssignment(op))return
   busy.value=true;const g=generation,opScope=scope
   try{await teamTaskAssignmentJournal.reserve(opScope,op);if(!current(g))return;restore(op);await send(op,g,opScope,true)}catch(e){if(current(g)){journalReady.value=false;journalError.value=e instanceof Error?e.message:'无法保留原分派，请检查浏览器存储。'}}finally{if(g===generation)busy.value=false}
@@ -93,5 +104,5 @@ export function useTeamTaskAssignment(props:{session:TeamSession;currentUserId?:
  function invalidated(event:Event){const d=(event as CustomEvent).detail;if(d?.filesOnly||d?.task)return;if((!d?.scope||d.scope===scope)&&(!d?.team||d.team===teamId)&&(!d?.session||d.session===sessionId))revoke()}
  onMounted(()=>{window.addEventListener('online',connectivity);window.addEventListener('offline',connectivity);window.addEventListener('storage',storage);window.addEventListener('team-delivery-cache-revoked',invalidated)})
  onBeforeUnmount(()=>{disposed=true;generation++;window.removeEventListener('online',connectivity);window.removeEventListener('offline',connectivity);window.removeEventListener('storage',storage);window.removeEventListener('team-delivery-cache-revoked',invalidated)})
- return {instruction,acceptance,targets,reviewRequired,reviewer,primary,checks,busy,loading,error,journalError,online,locked,revoked,pending,receiptMissing,confirmRetry,session,bindings,reviewers,deliveryEnabled,disabledReason,load,submit,resolve,retry}
+ return {referenceID,instruction,acceptance,targets,reviewRequired,reviewer,primary,checks,busy,loading,error,journalError,online,locked,revoked,pending,receiptMissing,confirmRetry,session,bindings,members,reviewers,deliveryEnabled,disabledReason,load,submit,resolve,retry}
 }

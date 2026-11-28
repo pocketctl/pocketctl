@@ -1,8 +1,10 @@
+import {validCodeStep,type CodeStep} from './code-step.js'
 import { boundedText, positiveRevision, stableDigest, validateReviewPolicy, type TaskReviewPolicy } from './delivery-contract.js'
 import { TeamRepositoryError } from './repository.js'
 
 export const PLAN_LIMITS = Object.freeze({ steps: 32, revisions: 100, bytes: 128 * 1024 })
 export interface TaskPlanStep {
+  code?: CodeStep
   step_id: string
   title: string
   instruction: string
@@ -40,18 +42,24 @@ export function validateTaskPlan(value: unknown): string[] {
   if (Buffer.byteLength(JSON.stringify(value), 'utf8') > PLAN_LIMITS.bytes) invalid('plan byte limit exceeded')
   const steps = new Map<string, TaskPlanStep>()
   for (const raw of plan.steps) {
-    const s = object(raw, ['step_id', 'title', 'instruction', 'acceptance', 'required', 'depends_on', 'review_policy'])
+    const s = object(raw, ['step_id', 'title', 'instruction', 'acceptance', 'required', 'depends_on', 'review_policy','code'])
     if (typeof s.step_id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(s.step_id) || steps.has(s.step_id)) invalid('step IDs must be unique safe identifiers')
     boundedText(s.title, 'step title', 120)
     boundedText(s.instruction, 'step instruction', 16000)
     boundedText(s.acceptance, 'step acceptance', 8000)
     if (typeof s.required !== 'boolean') invalid('required must be boolean')
+    if (s.code !== undefined && !validCodeStep(s.code)) invalid('invalid code workspace or Git base')
     validateReviewPolicy(s.review_policy)
+    if (s.code && s.code.kind !== 'develop' && (!Array.isArray(s.depends_on) || !s.depends_on.length || !s.review_policy.required_checks.length)) invalid('merge and verification steps require dependencies and named checks')
     if (!Array.isArray(s.depends_on) || s.depends_on.length > PLAN_LIMITS.steps || s.depends_on.some(id => typeof id !== 'string') || new Set(s.depends_on).size !== s.depends_on.length) invalid('dependencies must be unique step IDs')
     steps.set(s.step_id, raw as TaskPlanStep)
   }
   if (![...steps.values()].some(s => s.required)) invalid('at least one required step is needed')
   for (const step of steps.values()) for (const dependency of step.depends_on) {
+    if (step.code && step.code.kind !== 'develop') {
+      const parent=steps.get(dependency)?.code
+      if(!parent || parent.repository!==step.code.repository || parent.base_sha!==step.code.base_sha || (step.code.kind==='verify' && (step.depends_on.length!==1 || parent.kind!=='merge'))) invalid('integration requires compatible code inputs from the same baseline')
+    }
     if (!steps.has(dependency) || dependency === step.step_id) invalid('dependency must refer to another step in this task plan')
   }
   const pending = new Set(steps.keys()), order: string[] = []
@@ -64,7 +72,7 @@ export function validateTaskPlan(value: unknown): string[] {
 }
 
 export function stepDigest(step: TaskPlanStep): string {
-  return stableDigest({ ...step, depends_on: [...step.depends_on].sort(),
+  return stableDigest({ ...step, depends_on: step.code ? step.depends_on : [...step.depends_on].sort(),
     review_policy: { ...step.review_policy, required_checks: [...step.review_policy.required_checks].sort() } })
 }
 

@@ -30,7 +30,7 @@ func (sm *SessionManager) restoreConfiguredCollaborationCodex(ctx context.Contex
 	}
 	b := record.Binding
 	roots := policy.Roots()
-	if len(roots) == 0 || record.Cwd != collaborationWorkspace(roots[0], auth.BindingID) || b.NativeSessionID != id || b.Agent != adapter.AgentCodex || b.BindingID != auth.BindingID || b.TeamSessionID != auth.TeamSessionID || b.BindingRevision != auth.BindingRevision || b.OfferID != auth.OfferID || b.OfferRevision != auth.OfferRevision || b.OwnerUserID != auth.OwnerUserID || b.DaemonID != auth.DaemonID || b.ConfigRevision != auth.ConfigRevision || b.ConfigHash != auth.ConfigHash {
+	if len(roots) == 0 || record.Cwd != collaborationWorkspace(roots[0], workspaceKey(auth)) || b.NativeSessionID != id || b.Agent != adapter.AgentCodex || b.BindingID != auth.BindingID || b.TeamSessionID != auth.TeamSessionID || b.BindingRevision != auth.BindingRevision || b.OfferID != auth.OfferID || b.OfferRevision != auth.OfferRevision || b.OwnerUserID != auth.OwnerUserID || b.DaemonID != auth.DaemonID || b.ConfigRevision != auth.ConfigRevision || b.ConfigHash != auth.ConfigHash {
 		return ErrCollaborationBinding
 	}
 	if _, err = sm.validateTeamConfig(ctx, auth, adapter.AgentCodex); err != nil {
@@ -98,7 +98,7 @@ func (c *codexCoordinator) teamResumeParams(id string) (map[string]any, *protoco
 		return params, nil
 	}
 	b := record.Binding
-	if b.NativeSessionID != id || b.Agent != adapter.AgentCodex || b.ConfigRevision <= 0 || b.RuntimeModel == "" || b.BindingID == "" || filepath.Base(c.projectCwd) != fmt.Sprintf("%x", sha256.Sum256([]byte(b.BindingID)))[:24] {
+	if b.NativeSessionID != id || b.Agent != adapter.AgentCodex || b.ConfigRevision <= 0 || b.RuntimeModel == "" || b.BindingID == "" || filepath.Base(c.projectCwd) != fmt.Sprintf("%x", sha256.Sum256([]byte(attemptKey(b.BindingID, b.CodeAttempt))))[:24] {
 		return params, nil
 	}
 	config := protocol.TeamRuntimeConfig{Model: b.RuntimeModel, PermissionProfile: b.RuntimePermission}

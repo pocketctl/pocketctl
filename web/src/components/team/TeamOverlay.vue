@@ -36,9 +36,9 @@ let opener: HTMLElement | null = null;
 const controls = () =>
   Array.from(
     panel.value?.querySelectorAll<HTMLElement>(
-      'button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),a[href],[tabindex="0"]',
+      'button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary,a[href],[tabindex="0"]',
     ) ?? [],
-  ).filter(node=>node.tabIndex>=0 && !node.closest('details:not([open])'));
+  ).filter(node=>node.tabIndex>=0 && !(node.parentElement?.closest('details:not([open])') && node.tagName!=='SUMMARY'));
 function trapFocus(event: KeyboardEvent) {
   const list = controls(),
     first = list[0],

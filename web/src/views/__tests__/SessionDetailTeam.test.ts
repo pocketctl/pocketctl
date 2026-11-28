@@ -68,6 +68,28 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = '' })
 
 describe('team session detail', () => {
+  test('toggles fullscreen on the existing timeline and lets the mention list handle Escape first', async () => {
+    const { wrapper, router } = await render(document.body)
+    const toggle = wrapper.get('.session-fullscreen-toggle')
+    const composer = wrapper.get<HTMLTextAreaElement>('textarea')
+    const stream = wrapper.get('.messages').element
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-pressed')).toBe('true')
+    await composer.setValue('讨论 @')
+    expect(wrapper.find('.mention-menu').exists()).toBe(true)
+    await composer.trigger('keydown', { key: 'Escape' })
+    expect(wrapper.find('.mention-menu').exists()).toBe(false)
+    expect(toggle.attributes('aria-pressed')).toBe('true')
+    await composer.trigger('keydown', { key: 'Escape' })
+    expect(toggle.attributes('aria-pressed')).toBe('false')
+    expect(wrapper.get('.messages').element).toBe(stream)
+    expect(composer.element.value).toBe('讨论 @')
+    await toggle.trigger('click')
+    await router.push('/team/ctm_1/session/css_other')
+    await flushPromises()
+    expect(toggle.attributes('aria-pressed')).toBe('false')
+  })
+
   test('references the complete streamed Agent reply without mixing calls or authors', async () => {
     extraEvents.push(
       { ...events[1], id: 'chunk-2', event_seq: 3, content: ' completely' },
@@ -144,11 +166,20 @@ describe('team session detail', () => {
   })
   test('sends a targeted reply through the shared-session event path', async () => {
     const { wrapper } = await render()
-    await wrapper.get('[data-offer-id="offer-1"]').trigger('click')
-    await wrapper.findAll('.event-actions button').find(button=>button.text()==='引用')!.trigger('click')
+    await wrapper.get('[data-testid="team-session-composer"]').setValue('@d1')
+    await wrapper.get('[role="option"]').trigger('click')
+    await wrapper.get('.event-actions button[aria-label="消息操作"]').trigger('click')
+    const quote=Array.from(document.querySelectorAll<HTMLButtonElement>('.post-options button')).find(button=>button.textContent?.trim()==='引用')
+    expect(quote).toBeDefined()
+    quote!.click()
+    await flushPromises()
     await wrapper.get('[data-testid="team-session-composer"]').setValue('Follow up')
     await wrapper.get('[data-testid="team-session-send"]').trigger('click')
     expect(sendMessage).toHaveBeenCalledWith({ targetMode: 'offers', targetOfferIDs: ['offer-1'], referenceEventID: 'e1' })
+    await flushPromises()
+    await wrapper.get('[data-testid="team-session-composer"]').setValue('普通群聊')
+    await wrapper.get('[data-testid="team-session-send"]').trigger('click')
+    expect(sendMessage).toHaveBeenLastCalledWith({targetMode:'discussion',targetOfferIDs:[],referenceEventID:null})
   })
 
   test('only exposes native sessions owned by the current user', async () => {

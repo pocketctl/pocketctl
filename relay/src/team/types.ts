@@ -27,7 +27,7 @@ export type TeamSessionState = 'active' | 'paused' | 'ended' | 'archived'
 export type TeamRunState = 'ready' | 'running' | 'waiting_input' | 'blocked' | 'paused' | 'completed' | 'failed' | 'cancelled'
 export type TeamCallState = 'pending' | 'dispatched' | 'accepted' | 'completed' | 'failed' | 'blocked' | 'cancelled' | 'uncertain'
 export type TeamEventKind = 'member_message' | 'agent_message' | 'status' | 'context' | 'run' | 'system'
-export type TeamMessageTargetMode = 'offers' | 'all' | 'discussion'
+export type TeamMessageTargetMode = 'offers' | 'all' | 'discussion' | 'readonly_offer'
 export const TEAM_PROVIDERS = ['codex', 'claude-code', 'dsh', 'agentteams'] as const
 export type TeamProvider = typeof TEAM_PROVIDERS[number]
 export function isTeamProvider(value: unknown): value is TeamProvider {

@@ -24,7 +24,10 @@ export async function isCollaborationManagedSession(
     `SELECT 1 FROM collaboration_session_agent_bindings binding
      JOIN collaboration_sessions team_session ON team_session.team_session_id = binding.team_session_id
      WHERE binding.native_session_id = $1 AND binding.owner_user_id = $2
-       AND binding.state = 'active' AND team_session.state IN ('active', 'paused') LIMIT 1`,
+       AND binding.state = 'active' AND team_session.state IN ('active', 'paused')
+     UNION ALL SELECT 1 FROM collaboration_calls c JOIN team_agent_offers o USING(offer_id)
+       JOIN collaboration_sessions s ON s.team_session_id=c.team_session_id JOIN collaboration_session_agent_bindings b ON b.binding_id=c.binding_id
+       WHERE c.native_session_id=$1 AND o.owner_user_id=$2 AND c.code_workspace IS NOT NULL AND b.state='active' AND s.state IN ('active','paused') LIMIT 1`,
     [sessionId, userId],
   )
   return Boolean(result.rows[0])

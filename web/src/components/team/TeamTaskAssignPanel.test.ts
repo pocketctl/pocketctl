@@ -8,13 +8,13 @@ import { useAuth } from '../../composables/useAuth'
 import { TeamTaskAssignmentJournal, teamTaskAssignmentJournal, type TaskAssignment, type TaskAssignmentInput } from '../../services/teamTaskAssignmentJournal'
 import { deliveryCacheScope } from '../../services/teamDeliveryCache'
 import { getRelayOrigin } from '../../composables/useEnv'
-import type { TeamSession,TeamMember } from '../../types/team'
+import type { TeamSession,TeamMember,TeamEvent } from '../../types/team'
 const api=vi.hoisted(()=>({assignTeamTask:vi.fn(),getDeliveryCapabilities:vi.fn(),findTeamTaskAssignment:vi.fn(),getTeamSession:vi.fn(),listTeamMembers:vi.fn(),getTeamCapabilities:vi.fn()}))
 vi.mock('../../services/teamClient',async original=>({...await original<any>(),assignTeamTask:api.assignTeamTask,findTeamTaskAssignment:api.findTeamTaskAssignment,getTeamSession:api.getTeamSession,listTeamMembers:api.listTeamMembers,getTeamCapabilities:api.getTeamCapabilities}))
 vi.mock('../../services/teamDeliveryClient',()=>({getDeliveryCapabilities:api.getDeliveryCapabilities}))
-const session={id:'session',team_id:'team',state:'active',current_user_role:'member',current_context_version:4,agent_bindings:[{id:'b',state:'active',offer_id:'offer',provider:'codex',daemon_id:'fixture',availability:'online'}]} as TeamSession
+const session={id:'session',team_id:'team',state:'active',current_user_role:'member',current_context_version:4,agent_bindings:[{id:'b',state:'active',offer_id:'offer',owner_user_id:2,provider:'codex',daemon_id:'fixture',availability:'online'}]} as TeamSession
 const members=[{id:'m',user_id:2,display_label:'Reviewer',role:'member',state:'active'}] as TeamMember[]
-const result=(input:TaskAssignmentInput)=>({task_id:'task',event:{id:'event',team_session_id:'session',author_user_id:2,content:input.instruction+'\n\n交付与验收：\n'+input.acceptance,context_version:input.context_version,target_offer_ids:input.target_offer_ids},call_ids:['call']})
+const result=(input:TaskAssignmentInput)=>({task_id:'task',event:{id:'event',team_session_id:'session',author_user_id:2,content:input.instruction+'\n\n交付与验收：\n'+input.acceptance,context_version:input.context_version,target_offer_ids:input.target_offer_ids,reference:input.reference_event_id?{event_id:input.reference_event_id}:null},call_ids:['call']})
 let wrapper:ReturnType<typeof mount>,journal:TeamTaskAssignmentJournal
 const scope=()=>deliveryCacheScope(2,getRelayOrigin())
 beforeEach(()=>{
@@ -27,7 +27,7 @@ beforeEach(()=>{
 })
 afterEach(()=>{wrapper?.unmount();vi.restoreAllMocks();vi.unstubAllGlobals()})
 async function settled(){await flushPromises();await vi.waitFor(()=>{expect(wrapper.text()).not.toContain('正在读取分派设置…');expect(wrapper.text()).not.toContain('正在派发…')})}
-async function render(){wrapper=mount(TeamTaskAssignPanel,{props:{session,members,currentUserId:2},global:{stubs:{ActionList:{template:'<section><slot/><slot name="footer"/></section>'},ActionSelect:{template:'<div><slot/></div>'}}}});await settled()}
+async function render(source?:TeamEvent){wrapper=mount(TeamTaskAssignPanel,{props:{session,members,currentUserId:2,source},global:{stubs:{ActionList:{template:'<section><slot/><slot name="footer"/></section>'},ActionSelect:{template:'<div><slot/></div>'}}}});await settled()}
 async function fill(){await wrapper.get('textarea[placeholder="说明目标、范围和约束"]').setValue('Goal');await wrapper.get('textarea[placeholder="例如：提交修改文件，并说明验证命令和结果"]').setValue('Criteria');await wrapper.get('input[value="offer"]').setValue(true)}
 async function click(text:string){await wrapper.findAll('button').find(b=>b.text()===text)!.trigger('click');await settled()}
 async function submit(){await wrapper.get('form').trigger('submit');await settled()}
@@ -107,4 +107,25 @@ test('parent polling during an in-flight assignment cannot unlock a second dispa
  expect(wrapper.get('textarea').attributes('disabled')).toBeDefined();expect(api.getTeamSession).toHaveBeenCalledTimes(1)
  await wrapper.get('form').trigger('submit');expect(api.assignTeamTask).toHaveBeenCalledTimes(1)
  finish(result(op.input));await settled();expect(wrapper.emitted('assigned')).toEqual([['task']])
+})
+
+test('drafting from a reply preserves the referenced event and original agent through submission',async()=>{
+ const source={id:'reply',team_session_id:'session',kind:'agent_message',content:'实现个人置顶',author_offer_id:'offer'} as TeamEvent
+ await render(source)
+ expect((wrapper.get('textarea[placeholder="说明目标、范围和约束"]').element as HTMLTextAreaElement).value).toBe(source.content)
+ expect((wrapper.get('input[value="offer"]').element as HTMLInputElement).checked).toBe(true)
+ expect(api.assignTeamTask).not.toHaveBeenCalled()
+ await wrapper.get('textarea[placeholder="例如：提交修改文件，并说明验证命令和结果"]').setValue('按账号验收')
+ await submit()
+ expect(api.assignTeamTask.mock.calls[0][1]).toMatchObject({reference_event_id:'reply',target_offer_ids:['offer']})
+ expect(wrapper.emitted('assigned')).toEqual([['task']])
+})
+
+test('opening another reply while reconciling preserves the original intent',async()=>{
+ const old=await unknown()
+ wrapper.unmount()
+ await render({id:'other',team_session_id:'session',kind:'agent_message',content:'另一份方案',author_offer_id:'offer'} as TeamEvent)
+ expect((wrapper.get('textarea[placeholder="说明目标、范围和约束"]').element as HTMLTextAreaElement).value).toBe(old.input.instruction)
+ expect(wrapper.text()).not.toContain('已引用群内回复')
+ expect(api.assignTeamTask).toHaveBeenCalledTimes(1)
 })

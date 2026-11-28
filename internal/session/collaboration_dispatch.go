@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/teamcode"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,26 @@ var (
 	ErrCollaborationSessionBusy   = errors.New("collaboration_session_busy")
 )
 
+func attemptKey(binding, attempt string) string {
+	if attempt != "" {
+		return binding + "/attempt/" + attempt
+	}
+	return binding
+}
+func codeAttempt(a *protocol.CollaborationAuthorization) string {
+	if a.Delivery != nil && a.Delivery.Code != nil {
+		return a.Delivery.AttemptID
+	}
+	return ""
+}
+func workspaceKey(a *protocol.CollaborationAuthorization) string {
+	return attemptKey(a.BindingID, codeAttempt(a))
+}
+
 type collaborationNativeBinding struct {
+	CodeAttempt       string
+	PreparedCodeHead  string
+	CodeLease         int64
 	RuntimeModel      string
 	RuntimeEffort     string
 	RuntimePermission string
@@ -41,7 +61,7 @@ type collaborationNativeBinding struct {
 
 func ValidateCollaborationAuthorization(auth *protocol.CollaborationAuthorization, operation string) error {
 	if auth == nil || auth.ProtocolVersion != protocol.TeamCollaborationProtocolV1 || auth.Operation != operation ||
-		auth.CallID == "" || auth.TeamSessionID == "" || auth.BindingID == "" || auth.BindingRevision <= 0 ||
+		(auth.Delivery != nil && auth.Delivery.Code != nil && (operation != "create" || codeAttempt(auth) == "" || !protocol.ValidTeamDeliveryAttemptID(codeAttempt(auth)))) || auth.CallID == "" || auth.TeamSessionID == "" || auth.BindingID == "" || auth.BindingRevision <= 0 ||
 		auth.OfferID == "" || auth.OfferRevision <= 0 || auth.OwnerUserID <= 0 || auth.DaemonID == "" {
 		return ErrCollaborationAuthorization
 	}
@@ -150,7 +170,7 @@ func collaborationHasSelectedMemory(value *protocol.CollaborationContext) bool {
 func (sm *SessionManager) rollbackCollaborationCreate(binding collaborationNativeBinding, callID, workspace string, created *ProcessState) error {
 	sm.collaborationMu.Lock()
 	defer sm.collaborationMu.Unlock()
-	if sm.collaborationBindings[binding.BindingID] != binding {
+	if sm.collaborationBindings[attemptKey(binding.BindingID, binding.CodeAttempt)] != binding {
 		return nil
 	}
 	if sm.collaborationCalls[callID] == binding.NativeSessionID {
@@ -159,7 +179,7 @@ func (sm *SessionManager) rollbackCollaborationCreate(binding collaborationNativ
 	if err := sm.disposeFailedCollaborationSession(binding, workspace, created); err != nil {
 		return fmt.Errorf("collaboration_create_cleanup_failed: %w", err)
 	}
-	delete(sm.collaborationBindings, binding.BindingID)
+	delete(sm.collaborationBindings, attemptKey(binding.BindingID, binding.CodeAttempt))
 	return nil
 }
 
@@ -264,6 +284,23 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if err != nil {
 		return "", err
 	}
+	if codeAttempt(auth) != "" {
+		if permission == nil {
+			local := sm.TeamConfigCapabilities(ctx, agent)
+			if local == nil {
+				return "", ErrCollaborationAuthorization
+			}
+			permission, err = teamPermission(agent, local.DefaultConfig.PermissionProfile)
+			if err != nil {
+				return "", err
+			}
+		}
+		if (agent == adapter.AgentCodex && (permission.SandboxMode != "workspace-write" || permission.ApprovalPolicy != "on-request")) ||
+			(agent == adapter.AgentClaude && permission.Mode != "manual" && permission.Mode != "acceptEdits") ||
+			(agent != adapter.AgentCodex && agent != adapter.AgentClaude) {
+			return "", fmt.Errorf("code workspace requires an authorized writable provider profile")
+		}
+	}
 	if agent != adapter.AgentCodex && agent != adapter.AgentClaude && agent != adapter.AgentDSH {
 		return "", fmt.Errorf("%w: unsupported provider", ErrCollaborationAuthorization)
 	}
@@ -282,7 +319,7 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if sm.collaborationCalls == nil {
 		sm.collaborationCalls = make(map[string]string)
 	}
-	if old, exists := sm.collaborationBindings[auth.BindingID]; exists {
+	if old, exists := sm.collaborationBindings[workspaceKey(auth)]; exists {
 		if auth.RequestedConfig == nil || (old.ConfigRevision > auth.ConfigRevision || (old.ConfigRevision == auth.ConfigRevision && old.ConfigHash == auth.ConfigHash)) || old.TeamSessionID != auth.TeamSessionID || old.OwnerUserID != auth.OwnerUserID || old.OfferID != auth.OfferID || old.DaemonID != auth.DaemonID {
 			sm.collaborationMu.Unlock()
 			return "", ErrCollaborationBinding
@@ -295,11 +332,11 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 			sm.collaborationMu.Unlock()
 			return "", ErrCollaborationSessionBusy
 		}
-		if err := sm.disposeFailedCollaborationSession(old, collaborationWorkspace(roots[0], auth.BindingID), ps); err != nil {
+		if err := sm.disposeFailedCollaborationSession(old, collaborationWorkspace(roots[0], workspaceKey(auth)), ps); err != nil {
 			sm.collaborationMu.Unlock()
 			return "", err
 		}
-		delete(sm.collaborationBindings, auth.BindingID)
+		delete(sm.collaborationBindings, workspaceKey(auth))
 	}
 	if _, exists := sm.collaborationCalls[auth.CallID]; exists {
 		sm.collaborationMu.Unlock()
@@ -307,7 +344,7 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	}
 	binding := collaborationNativeBinding{
 		ConfigRevision: auth.ConfigRevision, ConfigHash: auth.ConfigHash,
-		NativeSessionID: "creating", TeamSessionID: auth.TeamSessionID, BindingID: auth.BindingID,
+		CodeAttempt: codeAttempt(auth), NativeSessionID: "creating", TeamSessionID: auth.TeamSessionID, BindingID: auth.BindingID,
 		BindingRevision: auth.BindingRevision, OfferID: auth.OfferID, OfferRevision: auth.OfferRevision,
 		OwnerUserID: auth.OwnerUserID, DaemonID: auth.DaemonID, Agent: agent,
 	}
@@ -318,9 +355,9 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 			binding.RuntimeEffort = *auth.RequestedConfig.ReasoningEffort
 		}
 	}
-	sm.collaborationBindings[auth.BindingID] = binding
+	sm.collaborationBindings[workspaceKey(auth)] = binding
 	sm.collaborationMu.Unlock()
-	workspace := collaborationWorkspace(roots[0], auth.BindingID)
+	workspace := collaborationWorkspace(roots[0], workspaceKey(auth))
 	var created *ProcessState
 	defer func() {
 		if createErr != nil && !errors.Is(createErr, errNativeSessionCreateUncertain) {
@@ -354,12 +391,12 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 		created = sm.sessions[nativeSessionID]
 		sm.mu.RUnlock()
 		sm.collaborationMu.Lock()
-		if sm.collaborationBindings[auth.BindingID] != binding {
+		if sm.collaborationBindings[workspaceKey(auth)] != binding {
 			sm.collaborationMu.Unlock()
 			return "", ErrCollaborationBinding
 		}
 		binding.NativeSessionID = nativeSessionID
-		sm.collaborationBindings[auth.BindingID] = binding
+		sm.collaborationBindings[workspaceKey(auth)] = binding
 		if err == nil {
 			sm.collaborationCalls[auth.CallID] = nativeSessionID
 		}
@@ -379,7 +416,7 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 			return "", fmt.Errorf("team_actual_configuration_mismatch")
 		}
 	}
-	if agent == adapter.AgentClaude || agent == adapter.AgentDSH || agent == adapter.AgentCodex {
+	if codeAttempt(auth) == "" && (agent == adapter.AgentClaude || agent == adapter.AgentDSH || agent == adapter.AgentCodex) {
 		if err := persistCollaborationNative(binding, workspace); err != nil {
 			return "", err
 		}
@@ -394,6 +431,30 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	}
 	if err := sm.prepareTeamStepInputs(prepareCtx, auth, teamContext, workspace); err != nil {
 		return "", err
+	}
+	if auth.Delivery != nil && auth.Delivery.Code != nil {
+		if policy.Allows(workspace) != nil {
+			return "", ErrCwdNotAuthorized
+		}
+		repo, e := teamcode.Resolve(prepareCtx, agent, auth, policy.Allows)
+		if e != nil {
+			return "", e
+		}
+		if e = teamcode.Prepare(prepareCtx, workspace, repo, auth); e != nil {
+			return "", e
+		}
+		head, e := teamcode.Head(prepareCtx, workspace)
+		if e != nil {
+			return "", e
+		}
+		sm.collaborationMu.Lock()
+		binding.PreparedCodeHead = head
+		binding.CodeLease = auth.Delivery.Code.LeaseGeneration
+		sm.collaborationBindings[workspaceKey(auth)] = binding
+		sm.collaborationMu.Unlock()
+		if e = persistCollaborationNative(binding, workspace); e != nil {
+			return "", e
+		}
 	}
 	if stepInputs || selectedMemory || register != nil || agent == adapter.AgentClaude || agent == adapter.AgentDSH {
 		base, baseErr := prepareCollaborationContext(teamContext)
@@ -495,11 +556,11 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 		sm.collaborationBindings = make(map[string]collaborationNativeBinding)
 		sm.collaborationCalls = make(map[string]string)
 	}
-	binding, exists := sm.collaborationBindings[auth.BindingID]
+	binding, exists := sm.collaborationBindings[workspaceKey(auth)]
 	if !exists {
 		roots := policy.Roots()
 		canonicalCwd, cwdErr := policy.AuthorizeProposed(process.Cwd)
-		if len(roots) == 0 || cwdErr != nil || process.Source != "daemon" || canonicalCwd != collaborationWorkspace(roots[0], auth.BindingID) ||
+		if len(roots) == 0 || cwdErr != nil || process.Source != "daemon" || canonicalCwd != collaborationWorkspace(roots[0], workspaceKey(auth)) ||
 			(process.Agent != adapter.AgentCodex && process.Agent != adapter.AgentClaude && process.Agent != adapter.AgentDSH) {
 			sm.collaborationMu.Unlock()
 			return ErrCollaborationBinding
@@ -518,7 +579,7 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 				binding.RuntimeEffort = *auth.RequestedConfig.ReasoningEffort
 			}
 		}
-		sm.collaborationBindings[auth.BindingID] = binding
+		sm.collaborationBindings[workspaceKey(auth)] = binding
 	}
 	if (auth.RequestedConfig != nil && (binding.ConfigRevision != auth.ConfigRevision || binding.ConfigHash != auth.ConfigHash)) || binding.NativeSessionID != nativeSessionID || binding.TeamSessionID != auth.TeamSessionID ||
 		binding.BindingRevision != auth.BindingRevision || binding.OfferID != auth.OfferID ||

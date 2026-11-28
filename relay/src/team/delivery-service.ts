@@ -1,6 +1,6 @@
 import { TRUSTED_EVIDENCE_COLUMNS } from './evidence-service.js'
 import { deliveryFailureCode } from './delivery-diagnostics.js'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { requireTeamAccess } from './access.js'
 import { TeamRepositoryError } from './repository.js'
@@ -160,7 +160,7 @@ export class TeamDeliveryService {
       const task = await this.task(client, taskId, actor)
       const head = await this.head(client, taskId)
       const spec = (await client.query(`SELECT * FROM team_task_specs WHERE task_id=$1 AND revision=$2`, [taskId, head.spec_revision])).rows[0]
-      const submissions = (await client.query(`SELECT s.*,d.decision_id,d.decision,d.reason AS decision_reason,d.reviewer_user_id,d.verified_checks,
+      const submissions = (await client.query(`SELECT s.*,source_call.code_workspace,d.decision_id,d.decision,d.reason AS decision_reason,d.reviewer_user_id,d.verified_checks,
         CASE WHEN d.decision='accepted' THEN COALESCE((
           SELECT CASE WHEN m.withdrawn_at IS NOT NULL THEN 'withdrawn'
             WHEN m.revoked_at IS NOT NULL THEN 'access_revoked' ELSE 'captured' END
@@ -168,6 +168,7 @@ export class TeamDeliveryService {
         ),'not_captured') ELSE NULL END AS personal_memory_capture,
         COALESCE((SELECT jsonb_agg(r.artifact_id) FROM team_artifact_revocations r WHERE r.submission_id=s.submission_id),'[]') AS revoked_artifact_ids
         FROM team_task_submissions s LEFT JOIN team_acceptance_decisions d USING(submission_id)
+        LEFT JOIN collaboration_calls source_call ON source_call.call_id=s.source_call_id
         WHERE s.task_id=$1 AND (s.state='published' OR s.submitted_by_user_id=$2)
           AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM team_task_step_attempts a WHERE a.attempt_id=$3 AND a.task_id=s.task_id AND a.call_id=s.source_call_id))
           AND ($3::uuid IS NOT NULL OR NOT EXISTS(SELECT 1 FROM team_task_step_attempts a WHERE a.task_id=s.task_id AND a.call_id=s.source_call_id))
@@ -181,6 +182,8 @@ export class TeamDeliveryService {
         WHERE current.attempt_id=$1 AND newer.attempt_no>current.attempt_no LIMIT 1`, [this.options.attemptId])).rows[0]
       return { team_id: task.team_id, task_id: taskId, task_state: task.state, specs, revision: Number(head.revision), spec: { ...spec, revision: Number(spec.revision) },
         latest_submission_id: head.latest_submission_id, submissions: submissions.map(s => ({ ...s,
+          ...(s.code_workspace && ['merge','verify'].includes(s.code_workspace.kind) ? {trusted_passed_checks:
+            [...new Map(trustedEvidence.filter(r=>r.submission_id===s.submission_id && r.repository===s.code_workspace.repository && r.code_revision===s.code_revision && Number(r.spec_revision)===Number(s.spec_revision)).map(r=>[r.check_id,r.result])).entries()].filter(([,result])=>result==='passed').map(([id])=>id)}:{}),
           can_revoke_artifacts: task.role !== 'viewer' && (Number(s.submitted_by_user_id) === actor || task.role === 'admin')
             && this.options.writesEnabledForTeam(task.team_id) && (!this.options.attemptId || !!this.options.stepWritesEnabledForTeam?.(task.team_id)) })), trusted_evidence: trustedEvidence, ...(this.options.attemptId ? { attempt_id: this.options.attemptId } : {}),
         writes_enabled: !superseded && !legacyLocked && this.options.writesEnabledForTeam(task.team_id) && task.role !== 'viewer' && (!this.options.attemptId || !!this.options.stepWritesEnabledForTeam?.(task.team_id)) }
@@ -283,7 +286,7 @@ export class TeamDeliveryService {
         SELECT h.task_id,h.spec_revision,h.revision,h.latest_submission_id,h.attempt_id,a.call_id FROM team_step_delivery_heads h
           JOIN team_task_step_attempts a ON a.attempt_id=h.attempt_id AND a.task_id=h.task_id
           WHERE $4 AND a.state IN ('reserved','dispatched','running','awaiting_review')
-      ) SELECT c.call_id,c.task_id,c.team_session_id,c.operation,c.native_session_id,h.attempt_id,
+      ) SELECT c.call_id,c.task_id,c.team_session_id,c.operation,c.native_session_id,c.code_workspace,h.attempt_id,
         c.binding_id,c.binding_revision,c.offer_id,c.offer_revision,o.provider,o.team_id,
         f.spec_revision,h.revision,h.latest_submission_id,p.primary_offer_id,COALESCE(x.revision,0) AS export_revision
       FROM collaboration_calls c
@@ -300,7 +303,7 @@ export class TeamDeliveryService {
         AND o.owner_user_id=$2 AND o.daemon_id=$1 AND o.state='active' AND o.revision=c.offer_revision
       JOIN collaboration_session_agent_bindings b ON b.binding_id=c.binding_id AND b.team_session_id=c.team_session_id
         AND b.offer_id=c.offer_id AND b.owner_user_id=$2 AND b.state='active' AND b.revision=c.binding_revision
-        AND b.native_session_id=c.native_session_id
+        AND (c.code_workspace IS NOT NULL OR b.native_session_id=c.native_session_id)
       JOIN collaboration_team_memberships m ON m.team_id=team.team_id AND m.user_id=$2 AND m.state='active' AND m.role<>'viewer'
       WHERE c.state='completed' AND c.native_session_id IS NOT NULL AND c.operation IN ('create','message')
         AND NOT EXISTS(SELECT 1 FROM deleted_sessions gone WHERE gone.session_id=c.native_session_id)
@@ -322,7 +325,7 @@ export class TeamDeliveryService {
           protocol_version: 1, operation: row.operation, call_id: row.call_id, team_session_id: row.team_session_id,
           binding_id: row.binding_id, binding_revision: Number(row.binding_revision), offer_id: row.offer_id,
           offer_revision: Number(row.offer_revision), owner_user_id: actor, daemon_id: daemonId,
-          delivery: { task_id: row.task_id, spec_revision: Number(row.spec_revision), ...(row.attempt_id ? { attempt_id: row.attempt_id } : {}) },
+          delivery: { ...(row.code_workspace?{code:row.code_workspace}:{}),task_id: row.task_id, spec_revision: Number(row.spec_revision), ...(row.attempt_id ? { attempt_id: row.attempt_id } : {}) },
         },
       })),
       next_cursor: rows.length > 100 ? page[page.length - 1].call_id as string : null,
@@ -398,6 +401,15 @@ export class TeamDeliveryService {
       if (this.options.attemptId && input.contribution_ids.length) throw new TeamRepositoryError('invalid_request', 'step inputs belong in the frozen dependency manifest')
       if (input.spec_revision !== Number(head.spec_revision)) throw new TeamRepositoryError('revision_conflict', 'task specification changed', Number(head.revision))
       const source = await requireDeliverySource(client, taskId, task.team_id, actor, input.source_call_id, input.spec_revision)
+      const bundle = input.artifacts.filter(a => a.mime_type==='application/x-git-bundle')
+      if(source.code_workspace) {
+        if(!/^[a-f0-9]{40}$/.test(input.code_revision??'') || bundle.length!==1 || bundle[0].id!=='team-code-bundle' || !bundle[0].required ||
+          !input.artifacts.some(a=>a.id==='team-code-manifest' && a.mime_type==='application/json' && a.required)) throw new TeamRepositoryError('invalid_request','代码交付需要实际提交和完整代码包')
+        if(source.code_workspace.kind==='verify'){
+          const frozen=(await client.query('SELECT frozen_inputs FROM team_task_step_attempts WHERE call_id=$1',[input.source_call_id])).rows[0]?.frozen_inputs
+          if(frozen?.length!==1 || frozen[0].code_revision!==input.code_revision) throw new TeamRepositoryError('invalid_request','验证必须使用冻结的合并提交')
+        }
+      } else if(bundle.length) throw new TeamRepositoryError('invalid_request','代码包仅可由代码步骤交付')
       const count = (await client.query<{ n: number }>('SELECT COUNT(*)::int AS n FROM team_task_submissions WHERE task_id=$1', [taskId])).rows[0].n
       if (count >= DELIVERY_LIMITS.submissions) throw new TeamRepositoryError('budget_exhausted', 'task submission limit reached')
       const spec = (await client.query('SELECT primary_offer_id FROM team_task_specs WHERE task_id=$1 AND revision=$2', [taskId, head.spec_revision])).rows[0]
@@ -462,7 +474,7 @@ export class TeamDeliveryService {
       const submission = await this.submission(client, taskId, submissionId)
       if (Number(submission.submitted_by_user_id) !== actor) throw new TeamRepositoryError('offer_owner_required', 'submission owner required')
       if (submission.state !== 'preparing' || Number(submission.spec_revision) !== Number(head.spec_revision)) throw new TeamRepositoryError('revision_conflict', 'submission is published or specification changed', Number(head.revision))
-      await requireDeliverySource(client, taskId, task.team_id, actor, submission.source_call_id, Number(submission.spec_revision))
+      const source=await requireDeliverySource(client, taskId, task.team_id, actor, submission.source_call_id, Number(submission.spec_revision))
       // A late draft cannot replace a currently accepted main delivery. An
       // explicit spec revision is needed; contributions never win by timing.
       if (submission.delivery_role === 'primary' && head.latest_submission_id) {
@@ -470,6 +482,21 @@ export class TeamDeliveryService {
         if (accepted) throw new TeamRepositoryError('invalid_state', 'accepted main delivery cannot be replaced implicitly')
       }
       await this.available(client, submission, new Set(submission.manifest.map(a => a.id)))
+      if(source.code_workspace){
+        const rows=(await client.query("SELECT artifact_id,content_bytes,byte_size,sha256 FROM team_submission_artifacts WHERE submission_id=$1 AND artifact_id IN ('team-code-manifest','team-code-bundle')",[submissionId])).rows
+        const bundle=rows.find(f=>f.artifact_id==='team-code-bundle'), data=rows.find(f=>f.artifact_id==='team-code-manifest')
+        let m
+        try{m=JSON.parse(data.content_bytes.toString('utf8'))}catch{throw new TeamRepositoryError('artifact_integrity','代码清单无效')}
+        const headerEnd=bundle.content_bytes.indexOf(Buffer.from('\n\n'))
+        const header=headerEnd>0 && headerEnd<32768 ? bundle.content_bytes.subarray(0,headerEnd).toString('utf8').split('\n'):[]
+        const pack:Buffer=bundle.content_bytes.subarray(headerEnd+2)
+        const validPack=pack.length>32 && pack.toString('ascii',0,4)==='PACK' && [2,3].includes(pack.readUInt32BE(4))
+          && pack.readUInt32BE(8)>0 && createHash('sha1').update(pack.subarray(0,-20)).digest().equals(pack.subarray(-20))
+        if(!validPack || !m || !m.scope || stableDigest(m.scope)!==stableDigest(source.code_workspace) || m.repository!==source.code_workspace.repository || m.base_sha!==source.code_workspace.base_sha || m.head_sha!==submission.code_revision ||
+         m.source_call_id!==source.call_id || m.attempt_id!==this.options.attemptId || m.bundle_sha256!==bundle.sha256 || m.bundle_bytes!==Number(bundle.byte_size) ||
+         header[0]!=='# v2 git bundle' || header.length!==3 || !header[1].startsWith('-'+m.base_sha+' ') || header[2]!==m.head_sha+' HEAD')
+          throw new TeamRepositoryError('artifact_integrity','代码包与本次尝试、基线或交付提交不一致')
+      }
       const version = Number((await client.query('SELECT COALESCE(MAX(version),0)+1 AS version FROM team_task_submissions WHERE task_id=$1', [taskId])).rows[0].version)
       await client.query(`UPDATE team_task_submissions SET state='published',version=$2,published_at=NOW() WHERE submission_id=$1`, [submissionId, version])
       await this.advanceHead(client, taskId, submissionId, submission.delivery_role === 'primary')
@@ -493,6 +520,12 @@ export class TeamDeliveryService {
       if (input.decision === 'accepted') {
         const required = spec.required_checks as string[]
         if (input.verified_checks.length !== required.length || required.some(id => !input.verified_checks.includes(id))) throw new TeamRepositoryError('evidence_required', 'reviewer must explicitly verify every required check')
+        const code=(await client.query('SELECT code_workspace FROM collaboration_calls WHERE call_id=$1',[submission.source_call_id])).rows[0]?.code_workspace
+        if(code && ['merge','verify'].includes(code.kind)){
+          const reports=(await client.query(`SELECT DISTINCT ON (check_id) check_id,result FROM team_trusted_evidence WHERE task_id=$1 AND submission_id=$2 AND spec_revision=$3 AND repository=$4 AND code_revision=$5 ORDER BY check_id,received_at DESC,evidence_id DESC`,[taskId,input.submission_id,head.spec_revision,code.repository,submission.code_revision])).rows
+          const missing=required.filter(id=>!reports.some(r=>r.check_id===id && r.result==='passed'))
+          if(missing.length) throw new TeamRepositoryError('evidence_required','提交 '+submission.code_revision+' 缺少通过的可信检查：'+missing.join('、'))
+        }
         const evidence = required.map(id => submission.evidence.find(e => e.check_id === id))
         if (evidence.some(e => !e || e.result === 'failed')) throw new TeamRepositoryError('evidence_required', 'required check has missing or failed evidence')
         await this.available(client, submission, new Set([...submission.manifest.filter(a => a.required).map(a => a.id), ...evidence.map(e => e!.artifact_id)]))

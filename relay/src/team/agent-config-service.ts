@@ -30,7 +30,7 @@ export function configCapabilities(agents: any, provider: string, capabilities: 
     || raw?.schema_version !== 2 || typeof raw.revision !== 'string'
     || !Array.isArray(raw.models) || !raw.models.length || !Array.isArray(raw.permission_profiles)
     || !['hot','recreate'].includes(raw.runtime_switch)) throw new TeamRepositoryError('capability_not_supported','daemon does not support Team configuration')
-  if (!raw.models.every((m: any) => typeof m.id === 'string' && m.id.length > 0 && Array.isArray(m.reasoning_efforts) && m.reasoning_efforts.every((e: any) => typeof e === 'string'))
+  if (!raw.models.every((m: any) => m && typeof m.id === 'string' && m.id.length > 0 && Array.isArray(m.reasoning_efforts) && m.reasoning_efforts.every((e: any) => typeof e === 'string'))
     || !raw.permission_profiles.every((p: any) => typeof p === 'string')) throw new TeamRepositoryError('capability_not_supported','invalid daemon configuration inventory')
   const result: TeamAgentConfigCapabilities = {schema_version:2,revision:raw.revision,
     models:raw.models.map((m: any) => ({id:m.id,reasoning_efforts:[...m.reasoning_efforts],...(typeof m.default_reasoning_effort==='string'&&m.reasoning_efforts.includes(m.default_reasoning_effort)?{default_reasoning_effort:m.default_reasoning_effort}:{})})),permission_profiles:[...raw.permission_profiles],
@@ -38,6 +38,20 @@ export function configCapabilities(agents: any, provider: string, capabilities: 
     overridable_fields:(policy?.overridable_fields ?? []).filter((f: unknown) => f === 'model' || f === 'reasoning_effort'),read_only:raw.read_only === true,runtime_switch:raw.runtime_switch}
   result.default_config = validateRuntimeConfig(raw.default_config,result)
   return result
+}
+
+export function readOnlyQuestionsEnabled(): boolean {
+  return process.env.TEAM_AGENT_CONFIG_V2 === 'on' && process.env.TEAM_DISCUSSIONS_V2 === 'on'
+}
+
+export function supportsReadOnlyQuestion(binding: {agents: unknown; provider: string; collaboration_capabilities: unknown}): boolean {
+  try {
+    const cap = configCapabilities(binding.agents, binding.provider, binding.collaboration_capabilities, null)
+    return cap.read_only && cap.permission_profiles.some(profile => profile === 'read_only' || profile === 'read-only')
+  } catch (error) {
+    if (error instanceof TeamRepositoryError && error.code === 'capability_not_supported') return false
+    throw error
+  }
 }
 
 export class TeamAgentConfigService {
@@ -116,8 +130,11 @@ export class TeamAgentConfigService {
   }
   async freeze(db:DB,sessionId:string,offerId:string,actor:number,mode?:import('./types.js').TeamRunMode) {
     let row=await this.binding(db,sessionId,offerId,actor,true)
-    if(process.env.TEAM_AGENT_CONFIG_V2!=='on'){if(row.requested_config)throw new TeamRepositoryError('team_feature_disabled','Team configuration is disabled');return null}
-    if (!row.requested_config && !supportsConfig(row)) return null // explicit legacy v1 path
+    if(process.env.TEAM_AGENT_CONFIG_V2!=='on'){if(row.requested_config || mode === 'discussion' || mode === 'review')throw new TeamRepositoryError('team_feature_disabled','Team configuration is disabled');return null}
+    if (!row.requested_config && !supportsConfig(row)) {
+      if (mode === 'discussion' || mode === 'review') throw new TeamRepositoryError('capability_not_supported','Agent cannot enforce read-only discussion')
+      return null
+    }
     if (!row.requested_config) {
       await this.initialize(db,sessionId,offerId,actor)
       row=await this.binding(db,sessionId,offerId,actor,true)

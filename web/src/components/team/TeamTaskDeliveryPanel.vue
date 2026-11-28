@@ -33,6 +33,12 @@
     <p v-if="!selected" class="delivery-notice">尚无主交付结果。文件准备完成并发布后，才能进行验收。</p>
     <template v-if="selected">
      <section class="delivery-section"><h4>提交摘要</h4><p class="delivery-copy">{{ selected.summary }}</p><small>{{ memberName(selected.submitted_by_user_id) }} · {{ selected.state==='preparing'?'产物准备中':date(selected.published_at) }}</small>
+      <dl class="review-facts">
+       <template v-if="selected.code_revision"><dt>{{ t('team.submission_code_revision') }}</dt><dd><code>{{ selected.code_revision.slice(0,12) }}</code></dd></template>
+       <template v-if="selectedSpec"><dt>验收人</dt><dd>{{ memberName(selectedSpec.reviewer_user_id) }}</dd></template>
+       <template v-if="selectedSpec?.required_checks.length"><dt>已有可用证据</dt><dd>{{ selectedSpec.required_checks.length - missingChecks.length }} / {{ selectedSpec.required_checks.length }}</dd></template>
+      </dl>
+      <p v-if="missingChecks.length" class="delivery-notice">{{ t('team.missing_evidence') }} · {{ missingChecks.join('、') }}</p>
       <p v-if="selected.decision_reason" class="delivery-notice">{{ selected.decision === 'changes_requested' ? '修改意见' : '验收说明' }}：{{ selected.decision_reason }}</p>
      </section>
      <section class="delivery-section"><h4>交付文件</h4>
@@ -63,11 +69,11 @@
      <TeamTrustedEvidence :task-id="taskId" :current-user-id="currentUserId" :submission="selected" :evidence="delivery.trusted_evidence || []" :available="verified && online" :members="members" @revoked="operations.revoke()" />
      <section class="delivery-section"><h4>验收标准 · 规格 v{{ selected.spec_revision }}</h4>
       <p class="delivery-copy">{{ selectedSpec?.acceptance || '规格暂不可用，请刷新后再核对。' }}</p>
-      <p>验收人：{{ memberName(selectedSpec?.reviewer_user_id) }}</p>
      </section>
      <TeamDeliveryMemoryStatus :task-id="taskId" :team-id="delivery.team_id" :current-user-id="currentUserId" :available="verified && online" :submission="selected" />
      <details class="delivery-section"><summary>交付来源与版本</summary><dl>
-      <dt>来源执行</dt><dd>{{ selected.source_call_id }}</dd><dt>代码版本</dt><dd>{{ selected.code_revision || '未提供' }}</dd>
+      <template v-if="selected.code_revision"><dt>代码版本</dt><dd><code>{{ selected.code_revision }}</code></dd></template>
+      <dt>来源执行</dt><dd>{{ selected.source_call_id }}</dd>
       <dt>共享材料</dt><dd>Context v{{ selected.context_version }}</dd><dt>贡献版本</dt><dd>{{ selected.contribution_ids.length || '无' }}</dd>
      </dl></details>
      <p v-if="selected.state==='preparing'" class="delivery-notice">产物仍在准备，暂不能验收。</p>
@@ -104,6 +110,7 @@
  </section>
 </template>
 <script setup lang="ts">
+import { useLocale } from '../../composables/useLocale'
 import '../../assets/team-delivery.css'
 import { deliveryFailureReason } from '../../services/teamDeliveryDiagnostics'
 import TeamExternalRecovery from './TeamExternalRecovery.vue'
@@ -122,6 +129,8 @@ import type { TaskDelivery, DeliveryArtifact, DeliveryDecision, DeliveryExecutio
 const props = withDefaults(defineProps<{ taskId: string; attemptId?:string; currentUserId: number; members?: TeamMember[] }>(), { members: () => [] })
 import TeamTrustedEvidence from './TeamTrustedEvidence.vue'
 import { useTeamDeliveryOperation } from '../../composables/useTeamDeliveryOperation'
+
+const { t } = useLocale()
 const emit = defineEmits<{ changed: []; revoked: [] }>()
 const delivery=ref<TaskDelivery|null>(null), selectedId=ref(''), loading=ref(false), busy=ref(false), error=ref(''), legacy=ref(false), verified=ref(false), online=ref(navigator.onLine)
 const managementBusy=ref(false)
@@ -154,7 +163,8 @@ const selectedSpec=computed(()=>delivery.value?.specs?.find(s=>Number(s.revision
 const current=computed(()=>selected.value?.submission_id===delivery.value?.latest_submission_id && Number(selected.value?.spec_revision)===Number(delivery.value?.spec.revision))
 const canReview=computed(()=>!operations.revoked.value && !managementBusy.value && !!delivery.value && verified.value && online.value && delivery.value.writes_enabled && ['open','in_progress'].includes(delivery.value.task_state)
  && current.value && selected.value?.state==='published' && !selected.value.decision && Number(delivery.value.spec.reviewer_user_id)===props.currentUserId)
-function checkAvailable(id:string){const s=selected.value,e=s?.evidence.find(e=>e.check_id===id);return !!s&&!!e&&e.result!=='failed'&&s.manifest.some(a=>a.id===e.artifact_id)&&!s.revoked_artifact_ids.includes(e.artifact_id)}
+function checkAvailable(id:string){const s=selected.value,e=s?.evidence.find(e=>e.check_id===id);return !!s&&(!s.trusted_passed_checks || s.trusted_passed_checks.includes(id))&&!!e&&e.result!=='failed'&&s.manifest.some(a=>a.id===e.artifact_id)&&!s.revoked_artifact_ids.includes(e.artifact_id)}
+const missingChecks=computed(()=>selectedSpec.value?.required_checks.filter(check=>!checkAvailable(check)) ?? [])
 const evidenceReady=computed(()=>!!selectedSpec.value && !!selected.value && selected.value.manifest.filter(a=>a.required).every(a=>!selected.value!.revoked_artifact_ids.includes(a.id)) && selectedSpec.value.required_checks.every(checkAvailable))
 const canAccept=computed(()=>!operations.blocked.value && canReview.value && evidenceReady.value && !busy.value && !pending.value && selectedSpec.value!.required_checks.every(id=>verifiedChecks.value.includes(id)))
 function memberName(id?:number){return props.members.find(m=>m.user_id===Number(id))?.display_label || (Number(id)===props.currentUserId?'我':id?`成员 ${id}`:'未知')}
@@ -216,4 +226,6 @@ onBeforeUnmount(()=>{clearInterval(authorityTimer);window.removeEventListener('f
 </script>
 <style scoped>
 .delivery-panel{font-size:13px;line-height:1.7;color:var(--fg)}.delivery-toolbar,.delivery-version{display:flex;align-items:center;justify-content:space-between;gap:12px}.delivery-toolbar h3{margin:0}.delivery-tabs{display:flex;gap:16px;border-bottom:1px solid var(--border);margin:18px 0}.delivery-tabs button{padding:10px 0;border:0;border-bottom:2px solid transparent;background:none;color:var(--fg-secondary);cursor:pointer}.delivery-tabs button[aria-selected=true]{color:var(--accent);border-bottom-color:var(--accent)}.delivery-section{padding:18px 0;border-bottom:1px solid var(--border)}h4{margin:0 0 10px;font-size:13px;font-weight:600}p{color:var(--fg-secondary)}.delivery-copy{white-space:pre-wrap;overflow-wrap:anywhere}.delivery-file{display:flex;justify-content:space-between;align-items:center;width:100%;padding:13px 0;background:none;color:var(--fg);border:0;border-bottom:1px solid var(--border);text-align:left;cursor:pointer}.delivery-file span{min-width:0;overflow-wrap:anywhere}small{display:block;color:var(--fg-secondary);font-size:11px}.delivery-notice{padding:12px;border:1px solid var(--border);border-radius:7px;background:var(--surface)}.delivery-error{color:var(--error)}.delivery-evidence{list-style:none;padding:0}.delivery-evidence label{display:flex;gap:10px;align-items:flex-start;padding:8px 0}.delivery-evidence input{accent-color:var(--accent);margin-top:5px}.delivery-review{padding:18px 0}.delivery-review .btn{margin-right:8px}.delivery-review label{display:grid;gap:8px}textarea{width:100%;box-sizing:border-box;padding:10px;background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:6px;font:inherit}dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 16px}dt{color:var(--fg-secondary)}dd{margin:0;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;padding:12px;background:var(--surface);font-size:12px}a{color:var(--accent)}summary{cursor:pointer}.delivery-execution{padding:14px 0;border-bottom:1px solid var(--border)}button:disabled{opacity:.5;cursor:not-allowed}
+.review-code { overflow-wrap:anywhere; user-select:text; }
+.review-facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 12px;margin:10px 0}.review-facts dt{color:var(--fg-secondary)}.review-facts dd{margin:0;overflow-wrap:anywhere}
 </style>

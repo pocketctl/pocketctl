@@ -40,7 +40,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   let syncPromise:Promise<void>|undefined
   let flushing=false
   const scope = computed(() => ({ type: 'team' as const, teamId: teamID.value }))
-  const { draft, clearDraft } = useScopedSessionDraft(scope, sessionID)
+  const { draft, clearDraft } = useScopedSessionDraft(scope, sessionID, accountScope)
   const session = ref<TeamSession | null>(null)
   const events = ref<TeamEvent[]>([])
   const calls = ref<TeamCallSummary[]>([])
@@ -154,7 +154,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
         if(row.state!=='queued')break
         row.state='sending';await teamOutbox.put({...row})
         try{
-          const result=await appendTeamMessage(row.session_id,{requestID:row.request_id,content:row.content,targetMode:row.target_mode,targetOfferIDs:row.target_offer_ids,referenceEventID:row.reference_event_id})
+          const result=await appendTeamMessage(row.session_id,{requestID:row.request_id,content:row.content,targetMode:row.target_mode,targetOfferIDs:row.target_offer_ids,referenceEventID:row.reference_event_id,...(row.target_mode === 'readonly_offer' ? {contextVersion:row.context_version} : {})})
           if(g!==generation||scope!==accountScope.value)break
           mergeEvents([result.event]);pendingMessages.value=pendingMessages.value.filter(p=>p.key!==row.key);await teamOutbox.remove(row.key);madeProgress=true;void refreshCalls()
         }catch(failure){
@@ -167,12 +167,25 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
       }
     }catch(failure){if(g===generation){authorityFailure(failure);error.value=errorMessage(failure)}}finally{flushing=false;if(madeProgress&&pendingMessages.value[0]?.state==='queued'&&connected.value&&!accessRevoked.value)queueMicrotask(()=>void flushOutbox())}
   }
+  async function cancelFailedQuestion(request:string) {
+    const row = pendingMessages.value.find(message => message.request_id === request)
+    const scope = accountScope.value
+    if (!row || row.scope !== scope || row.target_mode !== 'readonly_offer' || row.state !== 'failed' || accessRevoked.value) return
+    pendingMessages.value = pendingMessages.value.filter(message => message.key !== row.key)
+    try {
+      await teamOutbox.remove(row.key)
+      if (scope === accountScope.value) await flushOutbox()
+    } catch (failure) {
+      if (scope === accountScope.value) { error.value = errorMessage(failure); await restoreOutbox() }
+    }
+  }
   async function retryMessage(request:string){
     const row=pendingMessages.value.find(p=>p.request_id===request)
     if(!row||row.scope!==accountScope.value||accessRevoked.value)return
     if(row.state==='unknown'){if(await reconcileMessage(request))return;if(row.state==='unknown')return}
     if(!pendingMessages.value.includes(row))return
     await getTeamSession(row.session_id)
+    if(!pendingMessages.value.includes(row) || row.scope!==accountScope.value || accessRevoked.value)return
     row.state='queued';await teamOutbox.put({...row});await flushOutbox()
   }
   async function markRead(){
@@ -451,10 +464,13 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   async function sendMessage(input:{targetMode:TeamMessageTargetMode;targetOfferIDs?:string[];referenceEventID?:string|null}):Promise<boolean>{
     const content=draft.value.trim()
     if(!content||!canSend.value||!user.value||(input.targetMode!=='discussion'&&!callableBindings.value.length))return false
+    const question = input.targetMode === 'readonly_offer'
+    if (question && (input.targetOfferIDs?.length !== 1 || !callableBindings.value.some(b => b.offer_id === input.targetOfferIDs?.[0] && b.read_only_question))) return false
     sending.value=true;error.value=''
     try{
       const request=crypto.randomUUID(),scope=accountScope.value
       const row:TeamOutboxMessage={key:scope+':'+request,scope,session_id:sessionID.value,author_user_id:user.value.id,request_id:request,content,
+        ...(question ? {context_version:session.value!.current_context_version} : {}),
         target_mode:input.targetMode,target_offer_ids:input.targetOfferIDs??[],reference_event_id:input.referenceEventID??null,created_at:new Date().toISOString(),state:'queued'}
       await teamOutbox.put(row)
       if(scope!==accountScope.value)return false
@@ -525,7 +541,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   })
 
   return {
-    pendingMessages,contiguousEventSeq,retryMessage,reconcileMessage,markRead,
+    pendingMessages,contiguousEventSeq,cancelFailedQuestion,retryMessage,reconcileMessage,markRead,
     session, events, calls, context, runContext, runs, latestRun, task, capabilities, draft, loading, sending,
     runBusy, error, runError, connected, subscribed, callableBindings, autorunEnabled,
     readOnlyReason, canSend, load, reloadSession, refreshRuns, sendMessage, createRun,

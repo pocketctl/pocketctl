@@ -2,7 +2,7 @@ import type {TeamMessageTargetMode} from '../types/team'
 export type TeamSendState='queued'|'sending'|'failed'|'unknown'
 export interface TeamOutboxMessage {
  key:string;scope:string;request_id:string;session_id:string;author_user_id:number;content:string
- target_mode:TeamMessageTargetMode;target_offer_ids:string[];reference_event_id:string|null;created_at:string;state:TeamSendState;error?:string
+ target_mode:TeamMessageTargetMode;context_version?:number;target_offer_ids:string[];reference_event_id:string|null;created_at:string;state:TeamSendState;error?:string
 }
 export interface TeamOutboxStorage {
  list(scope:string):Promise<TeamOutboxMessage[]>

@@ -30,6 +30,19 @@ function appFor(overrides: Record<string, unknown>, writes = true) {
 }
 
 describe('Team shared session routes', () => {
+  test('read-only mode requires exactly one named recipient and an explicit Context version', async () => {
+    const appendMessage = vi.fn(async () => ({event:{id:'event'}, call_ids:['call']}))
+    const {app} = appFor({appendMessage})
+    const post = (overrides: Record<string, unknown>) => app.inject({method:'POST', url:'/api/team/sessions/s/events', headers:{authorization:'Bearer valid'},
+      payload:{request_id:'q',content:'Review this',target_mode:'readonly_offer',target_offer_ids:['o'],context_version:0,...overrides}})
+    for (const invalid of [{target_offer_ids:[]},{target_offer_ids:['o','o']},{target_offer_ids:[' ']},{context_version:null},{context_version:-1},{context_version:'1'}]) {
+      expect((await post(invalid)).statusCode).toBe(400)
+    }
+    expect(appendMessage).not.toHaveBeenCalled()
+    expect((await post({})).statusCode).toBe(201)
+    expect(appendMessage).toHaveBeenCalledWith(expect.objectContaining({actorUserId:23,targetMode:'readonly_offer',targetOfferIds:['o'],contextVersion:0}))
+    await app.close()
+  })
   test('looks up only the authenticated actor assignment receipt and distinguishes absence from denied access', async () => {
     const taskByRequest = vi.fn(async (session: string, _actor: number, key: string) => ({ operation:'assign_task', team_session_id:session, request_id:key, found:false, response:null }))
     const { app } = appFor({ taskByRequest })

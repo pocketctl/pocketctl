@@ -31,6 +31,7 @@ type TeamConfigModel struct {
 	ReasoningEfforts       []string `json:"reasoning_efforts"`
 }
 type TeamConfigCapabilities struct {
+	CodeWorkspaces     []TeamCodeGrant   `json:"code_workspaces,omitempty"`
 	SchemaVersion      int               `json:"schema_version"`
 	Revision           string            `json:"revision"`
 	Models             []TeamConfigModel `json:"models"`
@@ -39,4 +40,30 @@ type TeamConfigCapabilities struct {
 	DefaultSource      string            `json:"default_source"`
 	ReadOnly           bool              `json:"read_only"`
 	RuntimeSwitch      string            `json:"runtime_switch"`
+}
+
+type TeamCodeScope struct {
+	Repository    string   `json:"repository"`
+	BaseSHA       string   `json:"base_sha"`
+	GrantRevision string   `json:"grant_revision"`
+	Paths         []string `json:"paths"`
+	Tools         []string `json:"tools"`
+}
+type TeamCodeGrant struct {
+	TeamCodeScope
+	TeamID  string `json:"team_id"`
+	OfferID string `json:"offer_id"`
+}
+type TeamCodeDependency struct {
+	StepID       string `json:"step_id"`
+	AttemptID    string `json:"attempt_id"`
+	SubmissionID string `json:"submission_id"`
+}
+type TeamCodeStep struct {
+	InputHash       string               `json:"input_hash,omitempty"`
+	Upstream        []TeamCodeDependency `json:"upstream,omitempty"`
+	LeaseGeneration int64                `json:"lease_generation,omitempty"`
+	TeamCodeScope
+	TeamID string `json:"team_id"`
+	Kind   string `json:"kind"`
 }

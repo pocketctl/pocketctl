@@ -1,3 +1,4 @@
+import {initGroupAssignmentSchema} from './group-assignment-schema.js'
 import { initTeamTaskReadinessSchema } from './task-readiness-schema.js'
 import { initTeamTemplateSchema } from './template-schema.js'
 import { initTeamDeliveryMemorySchema } from './delivery-memory-schema.js'
@@ -236,7 +237,7 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       kind VARCHAR(24) NOT NULL CHECK (kind IN ('member_message', 'agent_message', 'status', 'context', 'run', 'system')),
       author_user_id INT REFERENCES users(id) ON DELETE SET NULL,
       author_offer_id TEXT REFERENCES team_agent_offers(offer_id) ON DELETE SET NULL,
-      target_mode VARCHAR(16) CHECK (target_mode IS NULL OR target_mode IN ('offers', 'all', 'discussion')),
+      target_mode VARCHAR(16) CONSTRAINT collaboration_events_target_mode_v2 CHECK (target_mode IN ('offers', 'all', 'discussion', 'readonly_offer')),
       target_offer_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
       reference_event_id TEXT REFERENCES collaboration_events(event_id) ON DELETE SET NULL,
       reference_event_seq BIGINT,
@@ -491,6 +492,16 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       FOR EACH ROW EXECUTE FUNCTION journal_team_event();
   `)
 
+  // Existing installations have the original inline CHECK. Replace it once.
+  await db.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='collaboration_events'::regclass
+      AND conname='collaboration_events_target_mode_v2') THEN
+      ALTER TABLE collaboration_events DROP CONSTRAINT IF EXISTS collaboration_events_target_mode_check;
+      ALTER TABLE collaboration_events ADD CONSTRAINT collaboration_events_target_mode_v2
+        CHECK (target_mode IN ('offers', 'all', 'discussion', 'readonly_offer'));
+    END IF;
+  END $$`)
+
   // Keep attribution after the short-lived transport inbox is pruned. The
   // source FK is private metadata, never part of the shared event view.
   await db.query(`ALTER TABLE collaboration_events ADD COLUMN IF NOT EXISTS native_source_event_id BIGINT REFERENCES events(id) ON DELETE SET NULL`)
@@ -512,6 +523,7 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
   await initTeamAccountLifecycleSchema(db)
   await initTeamDeliveryMemorySchema(db)
   await initTeamPlanSchema(db)
+  await initGroupAssignmentSchema(db)
   await initTeamTemplateSchema(db)
   await initTeamEvidenceSchema(db)
   await initTeamTaskReadinessSchema(db)

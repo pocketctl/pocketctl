@@ -66,7 +66,7 @@ export function validateSubmission(value: PrepareSubmission): void {
     ids.add(artifact.id)
     boundedText(artifact.name, 'artifact name', 240)
     if (/[\/\\\r\n]/.test(artifact.name) || artifact.name === '.' || artifact.name === '..') deliveryInvalid('artifact name must not contain a path')
-    if (!['text/plain', 'text/markdown', 'text/html', 'text/x-diff', 'application/json', 'application/pdf'].includes(artifact.mime_type)) deliveryInvalid('unsupported artifact type')
+    if (!['text/plain', 'text/markdown', 'text/html', 'text/x-diff', 'application/json', 'application/pdf','application/x-git-bundle'].includes(artifact.mime_type)) deliveryInvalid('unsupported artifact type')
     if (!Number.isSafeInteger(artifact.byte_size) || artifact.byte_size < 1 || artifact.byte_size > DELIVERY_LIMITS.artifactBytes) deliveryInvalid('artifact byte limit exceeded')
     if (typeof artifact.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(artifact.sha256) || typeof artifact.required !== 'boolean') deliveryInvalid('artifact hash or required flag invalid')
   }

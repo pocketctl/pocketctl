@@ -336,12 +336,13 @@ export async function listTeamEvents(sessionID: string, afterSequence = 0, limit
   return teamRequest(`/api/team/sessions/${encodeURIComponent(sessionID)}/events?after_seq=${afterSequence}&limit=${limit}`)
 }
 
-export async function appendTeamMessage(sessionID: string, input: { content: string; targetMode: TeamMessageTargetMode; targetOfferIDs?: string[]; referenceEventID?: string | null;requestID?:string }): Promise<{ event: TeamEvent; call_ids: string[] }> {
+export async function appendTeamMessage(sessionID: string, input: { content: string; targetMode: TeamMessageTargetMode; targetOfferIDs?: string[]; referenceEventID?: string | null;requestID?:string;contextVersion?:number }): Promise<{ event: TeamEvent; call_ids: string[] }> {
   return teamRequest(`/api/team/sessions/${encodeURIComponent(sessionID)}/events`, {
     method: 'POST',
     body: {
       request_id: input.requestID ?? requestID(), content: input.content, target_mode: input.targetMode,
       target_offer_ids: input.targetOfferIDs ?? [], reference_event_id: input.referenceEventID ?? null,
+      ...(input.targetMode === 'readonly_offer' ? {context_version:input.contextVersion} : {}),
     },
   })
 }

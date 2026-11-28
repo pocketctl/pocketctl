@@ -26,11 +26,13 @@ describe('SessionDetail floating composer layout', () => {
   })
 
   test('aligns the message stream and composer to one shared reading column', () => {
-    const chatArea = cssRule('.chat-area')
+    const shared = readFileSync(resolve(process.cwd(), 'src/assets/session-reading-layout.css'), 'utf8')
+    const team = readFileSync(resolve(process.cwd(), 'src/views/TeamSessionDetail.vue'), 'utf8')
     const messages = cssRule('.chat-messages')
     const composer = cssRule('.chat-input-area')
 
-    expect(chatArea).toContain('--session-content-gutter: max(20px, calc(50% - 460px))')
+    for (const view of [source, team]) expect(view).toContain('session-reading-pane')
+    expect(cssRule('.session-reading-pane', shared)).toContain('--session-content-gutter: max(20px, calc(50% - 460px))')
     expect(messages).toContain('var(--session-content-gutter)')
     expect(composer).toContain('var(--session-content-gutter)')
   })

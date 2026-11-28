@@ -11,6 +11,7 @@
    <p v-if="!plan.plan">尚无执行计划。此任务沿用原有交付流程。</p>
    <template v-else>
     <p>{{ execution.runtime?'生效计划':'未激活草稿' }} v{{ plan.plan.revision }} · {{ execution.runtime?runtimeLabel:'尚未调度' }}</p>
+    <p v-if="execution.runtime">{{ t('team.accepted_steps') }} · {{ plan.plan.steps.filter(step => latest(step.step_id)?.state === 'accepted').length }} / {{ plan.plan.steps.length }}</p>
     <p v-if="execution.runtime">暂停或取消只影响后续预留。已经发出的调用继续运行。</p>
     <p v-if="!execution.execution_enabled">服务端未开放新步骤执行；仍可查阅已有记录。</p>
     <p v-if="execution.scheduler.last_error_code">调度待处理：{{ taskDiagnosticLabel(execution.scheduler.last_error_code) }}</p>
@@ -32,6 +33,7 @@
  </section>
 </template>
 <script setup lang="ts">
+import { useLocale } from '../../composables/useLocale'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { getRelayOrigin } from '../../composables/useEnv'
 import type { TeamMember } from '../../types/team'
@@ -45,6 +47,8 @@ import TeamTaskPlanEditor from './TeamTaskPlanEditor.vue'
 import TeamTaskPlanControls from './TeamTaskPlanControls.vue'
 import TeamTaskBudget from './TeamTaskBudget.vue'
 import TeamTaskRecovery from './TeamTaskRecovery.vue'
+
+const { t } = useLocale()
 const props=defineProps<{taskId:string;currentUserId:number;available:boolean;members?:TeamMember[]}>()
 const emit=defineEmits<{revoked:[]}>()
 const plan=ref<TaskPlanSnapshot|null>(null),execution=ref<TaskPlanExecution|null>(null),context=ref<TaskContext|null>(null)

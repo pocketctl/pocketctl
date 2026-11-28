@@ -11,15 +11,16 @@
   <p v-if="journalError" role="alert">{{ journalError }}</p>
   <p v-if="loading" role="status">正在读取分派设置…</p>
   <form v-if="!revoked" id="team-assign-task" class="task-form" @submit.prevent="submit">
+   <p v-if="referenceID">{{ t('team.assignment_from_reply') }}</p>
    <label>任务说明（必填）<textarea v-model="instruction" :disabled="locked" required maxlength="32000" rows="5" placeholder="说明目标、范围和约束" /></label>
    <label>交付与验收（必填）<textarea v-model="acceptance" :disabled="locked" required maxlength="16000" rows="3" placeholder="例如：提交修改文件，并说明验证命令和结果" /></label>
    <fieldset class="task-agents" aria-describedby="task-agent-hint">
     <legend><span class="task-agent-heading"><span>执行 Agent</span><span class="task-agent-count" aria-live="polite">已选 {{ targets.length }}</span></span></legend>
-    <p id="task-agent-hint" class="task-agent-hint">选择本次任务的执行 Agent，可多选。</p>
+    <p id="task-agent-hint" class="task-agent-hint">{{ t('team.assignment_shared_instruction') }}</p>
     <div v-if="bindings.length" class="task-agent-list">
      <label v-for="binding in bindings" :key="binding.id" class="task-agent-option" :class="{ selected:targets.includes(binding.offer_id), unavailable:binding.availability!=='online' }">
       <input v-model="targets" type="checkbox" :value="binding.offer_id" :disabled="locked || binding.availability!=='online'" />
-      <span class="task-agent-copy"><AgentBadge :agent="binding.provider" size="md" /><small>主机 · {{ binding.daemon_id }}</small></span>
+      <span class="task-agent-copy"><AgentBadge :agent="binding.provider" size="md" /><small>{{ ownerLabel(binding.owner_user_id) }} · {{ binding.daemon_id }}</small></span>
       <span class="task-agent-status" :class="{ online:binding.availability==='online' }"><i aria-hidden="true"></i>{{ teamAvailabilityLabel(binding.availability) }}</span>
      </label>
     </div>
@@ -29,7 +30,7 @@
     <label><input v-model="reviewRequired" type="checkbox" :disabled="locked" />需要人工验收</label>
     <template v-if="reviewRequired">
      <label>验收人<ActionSelect><select v-model="reviewer" aria-label="验收人" :disabled="locked"><option :value="0" disabled>请选择</option><option v-for="member in reviewers" :key="member.user_id" :value="member.user_id">{{ memberLabel(member) }}</option></select></ActionSelect></label>
-     <label>主交付 Agent<ActionSelect><select v-model="primary" aria-label="主交付 Agent" :disabled="locked"><option v-for="binding in bindings.filter(b=>targets.includes(b.offer_id))" :key="binding.offer_id" :value="binding.offer_id">{{ binding.provider }} · {{ binding.daemon_id }}</option></select></ActionSelect></label>
+     <label>主交付 Agent<ActionSelect><select v-model="primary" aria-label="主交付 Agent" :disabled="locked"><option v-for="binding in bindings.filter(b=>targets.includes(b.offer_id))" :key="binding.offer_id" :value="binding.offer_id">{{ binding.provider }} · {{ ownerLabel(binding.owner_user_id) }} · {{ binding.daemon_id }}</option></select></ActionSelect></label>
      <label>必需检查项（每行一项）<textarea v-model="checks" rows="3" maxlength="3800" aria-label="必需检查项" :disabled="locked" placeholder="例如：单元测试、重连验证" /></label>
      <p>只有主交付进入人工验收。其他 Agent 的贡献不会覆盖主交付；执行权限审批仍由 Agent 所有者处理。</p>
     </template>
@@ -43,6 +44,7 @@
  </ActionList>
 </template>
 <script setup lang="ts">
+import { useLocale } from '../../composables/useLocale'
 import {ref} from 'vue'
 import TeamTemplateTaskPanel from './TeamTemplateTaskPanel.vue'
 import ActionSelect from '../ActionSelect.vue'
@@ -51,11 +53,17 @@ import AgentBadge from '../AgentBadge.vue'
 import {teamAvailabilityLabel} from '../../utils/teamLabels'
 import {useTeamTaskAssignment} from '../../composables/useTeamTaskAssignment'
 import type {TeamSession,TeamEvent,TeamMember} from '../../types/team'
-const props=defineProps<{session:TeamSession;members?:TeamMember[];currentUserId?:number}>(),emit=defineEmits<{close:[];sent:[event:TeamEvent];assigned:[taskId:string]}>()
-const {instruction,acceptance,targets,reviewRequired,reviewer,primary,checks,busy,loading,error,journalError,online,locked,revoked,pending,receiptMissing,confirmRetry,session:currentSession,bindings,reviewers,deliveryEnabled,disabledReason,load,submit,resolve,retry}=useTeamTaskAssignment(props,result=>{emit('sent',result.event);emit('assigned',result.task_id);emit('close')})
+
+const { t } = useLocale()
+const props=defineProps<{session:TeamSession;source?:TeamEvent|null;members?:TeamMember[];currentUserId?:number}>(),emit=defineEmits<{close:[];sent:[event:TeamEvent];assigned:[taskId:string]}>()
+const {referenceID,instruction,acceptance,targets,reviewRequired,reviewer,primary,checks,busy,loading,error,journalError,online,locked,revoked,pending,receiptMissing,confirmRetry,session:currentSession,bindings,members:availableMembers,reviewers,deliveryEnabled,disabledReason,load,submit,resolve,retry}=useTeamTaskAssignment(props,result=>{emit('sent',result.event);emit('assigned',result.task_id);emit('close')})
 const templateOpen=ref(false)
 function templateCreated(task:string){emit('assigned',task);emit('close')}
-function memberLabel(member:TeamMember){if(member.user_id===props.currentUserId)return member.display_label+' · 我';return reviewers.value.filter(m=>m.display_label===member.display_label).length>1?member.display_label+' · 成员 '+member.user_id:member.display_label}
+function ownerLabel(id:number) {
+ const member=availableMembers.value.find(person=>person.user_id===id)
+ return member ? memberLabel(member) : t('workspace.member_id',{id})
+}
+function memberLabel(member:TeamMember){if(member.user_id===props.currentUserId)return member.display_label+' · 我';return availableMembers.value.filter(m=>m.display_label===member.display_label).length>1?member.display_label+' · 成员 '+member.user_id:member.display_label}
 </script>
 <style scoped>
 .task-recovery{padding:12px;border:1px solid var(--border);border-radius:10px}.task-recovery button{margin:4px 8px 4px 0}.task-form{display:grid;gap:18px}.task-form>label{display:grid;gap:8px}textarea{width:100%;box-sizing:border-box;resize:vertical;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}fieldset{display:grid;gap:12px;border:1px solid var(--border)}p{font-size:12px;color:var(--fg-secondary)}button{padding:10px 18px;border:0;border-radius:6px;background:var(--accent);color:var(--bg)}

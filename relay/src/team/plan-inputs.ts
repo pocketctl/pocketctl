@@ -5,6 +5,7 @@ import { TeamRepositoryError } from './repository.js'
 
 export interface PlanInputSelection { step_id: string; attempt_id: string; submission_id: string }
 export interface FrozenPlanInput extends PlanInputSelection {
+  code?: TaskPlanStep["code"]
   plan_revision: number
   source_call_id: string
   submission_version: number
@@ -34,7 +35,7 @@ export async function freezeAcceptedPlanInputs(db: Pick<pg.PoolClient, 'query'>,
     throw new TeamRepositoryError('invalid_request', 'freeze requires exactly one explicit accepted input per dependency')
   }
   const result: FrozenPlanInput[] = []
-  for (const selected of [...selections].sort((a, b) => a.step_id.localeCompare(b.step_id))) {
+  for (const selected of (target.code ? target.depends_on.map(id => selections.find(s => s.step_id===id)!) : [...selections].sort((a,b)=>a.step_id.localeCompare(b.step_id)))) {
     if (![selected.attempt_id, selected.submission_id].every(id => /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(id))) throw new TeamRepositoryError('invalid_request', 'invalid input identity')
     const row = (await db.query(`SELECT a.plan_revision,a.state AS attempt_state,a.call_id,
         old.definition AS attempt_definition,current.definition AS current_definition,s.*,d.decision_id,d.decision,d.reviewer_user_id,d.verified_checks
@@ -62,7 +63,7 @@ export async function freezeAcceptedPlanInputs(db: Pick<pg.PoolClient, 'query'>,
     })) throw new TeamRepositoryError('artifact_unavailable', 'dependency files are missing, revoked or corrupt')
     const trusted = (await db.query(`SELECT evidence_id,connector_id,principal_user_id,connector_kind,repository,run_id,check_id,spec_revision,code_revision,result,report_sha256
       FROM team_trusted_evidence WHERE task_id=$1 AND submission_id=$2 ORDER BY evidence_id`, [taskId, selected.submission_id])).rows.map(r => ({ ...r, spec_revision: Number(r.spec_revision) })) as NonNullable<FrozenPlanInput['trusted_evidence']>
-    result.push({ ...selected, plan_revision: Number(row.plan_revision), source_call_id: row.call_id,
+    result.push({ ...selected, ...(definition.code ? {code:definition.code}:{}), plan_revision: Number(row.plan_revision), source_call_id: row.call_id,
       submission_version: Number(row.version), spec_revision: Number(row.spec_revision), context_version: Number(row.context_version), context_hash: row.context_hash,
       decision_id: row.decision_id, reviewer_user_id: Number(row.reviewer_user_id), verified_checks: row.verified_checks, code_revision: row.code_revision,
       manifest_sha256: row.manifest_sha256, evidence_sha256: stableDigest(row.evidence), artifacts: row.manifest, evidence: row.evidence,
